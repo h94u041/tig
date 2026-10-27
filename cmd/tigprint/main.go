@@ -19,6 +19,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/h94u041/tig"
+	"github.com/h94u041/tig/hub"
 	"github.com/h94u041/tig/mcpserver"
 )
 
@@ -55,6 +56,11 @@ Footprint
 Agents
   mcp [-run]                                             serve this tig over MCP on stdin and stdout;
                                                          -run lets agents have tig run acceptance commands
+
+Hub
+  push [-token t] [-m note] <url>                        send the documents and the chain to a hub
+                                                         (url http://host/owner/name, or $TIG_HUB;
+                                                         the token is -token or $TIG_TOKEN)
   version
 
 A block is named by its content hash; any unique prefix of 8 or more characters
@@ -102,7 +108,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	cmds := map[string]func([]string) error{
 		"init": c.init, "snap": c.snap, "log": c.log, "diff": c.diff, "restore": c.restore,
 		"blocks": c.blocks, "chain": c.chain, "show": c.show, "search": c.search, "check": c.check,
-		"trail": c.trail, "work": c.work, "mcp": c.mcp,
+		"trail": c.trail, "work": c.work, "mcp": c.mcp, "push": c.push,
 		"version": func([]string) error { fmt.Fprintf(c.out, "tigprint %s\n", version); return nil },
 	}
 	name := g.Arg(0)
@@ -889,4 +895,37 @@ func (c *cli) mcp(args []string) error {
 	}
 	s := mcpserver.New(c.r, mcpserver.Options{Version: version, AllowRun: *allowRun})
 	return s.Run(c.ctx, &mcp.StdioTransport{})
+}
+
+func (c *cli) push(args []string) error {
+	fs := c.flags("push")
+	token := fs.String("token", os.Getenv("TIG_TOKEN"), "the owner's token on the hub (default $TIG_TOKEN)")
+	note := fs.String("m", "", "a note for this publication")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	project := os.Getenv("TIG_HUB")
+	if fs.NArg() > 0 {
+		project = fs.Arg(0)
+	}
+	if project == "" {
+		return errors.New("push needs the project's address on a hub: tigprint push http://host/owner/name (or $TIG_HUB)")
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	res, err := hub.Push(c.ctx, c.r, project, *token, c.actor, *note)
+	if len(res.Unsnapped) > 0 {
+		fmt.Fprintf(c.errs, "these documents changed since the latest snapshot and are pushed as it has them (run tigprint snap): %s\n",
+			strings.Join(res.Unsnapped, ", "))
+	}
+	if err != nil {
+		return err
+	}
+	if res.UpToDate {
+		fmt.Fprintf(c.out, "up to date: %s has these documents and this chain (publication %s)\n", project, short(res.Publication.ID))
+		return nil
+	}
+	fmt.Fprintf(c.out, "pushed publication %s to %s (%d objects sent)\n", short(res.Publication.ID), project, res.Sent)
+	return nil
 }

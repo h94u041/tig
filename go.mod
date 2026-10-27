@@ -2,7 +2,10 @@ module github.com/h94u041/tig
 
 go 1.25.0
 
-require github.com/modelcontextprotocol/go-sdk v1.8.0
+require (
+	github.com/modelcontextprotocol/go-sdk v1.8.0
+	github.com/yuin/goldmark v1.7.13
+)
 
 require (
 	github.com/google/jsonschema-go v0.4.3 // indirect

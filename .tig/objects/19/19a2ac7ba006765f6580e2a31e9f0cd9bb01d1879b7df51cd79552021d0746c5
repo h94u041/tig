@@ -1,0 +1,14 @@
+tig-work 1
+parent 97ea5c02adec070159aa87bc414d6f035c685be425cd58a18ce1b375f8369e34
+basis 19ffcd54abb90223c9d7b03889088fb9f668cc05bc55176fd9afd8d17ac4e38b
+intent README: why tig, where its potential lies; translations in German, French, Russian, Japanese and Chinese
+before 44b70b7ba4492094f4060766acd0a5aabae3888df426eb852073241173526f01
+after 0a7b8a8062cad333b459be913860377334f0f02586e85a185e6f1e83c4e7c57c
+step 729f5b49c095828c6cdaddedc7ebe9eb77774e97245cfd1dac891ac39377c60c
+step d5bb072bda7fcdc2b7fe25db922f493e4d531b99771efb7e2a2a3994a9eb96ec
+step 6b2f0edfd7a71bf81d90ba784f8dd1faf4ba56d7bb3632d8e583b138c1950ca4
+step 73d9a718352a8b0b75eeb1d3611f226e9b29d90a8b06a9b6709f71e1f6343363
+result passed
+actor claude-code
+started 2026-10-27T18:00:44.9319015Z
+at 2026-10-27T18:05:24.1182476Z

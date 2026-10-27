@@ -1,0 +1,8 @@
+tig-step 1
+kind edit
+basis 75fbef015c611909d01ef5124cd66881d505cd8619cac6c5735ed6114fe1e7c6
+before 904e4a83f2115731d21d9cec4609b4025cb54d123f14406d16295e51509b9f88
+after 0476eae94646b65120233a1f5e78a580b3d4c620c830a9300154a6382ce52158
+note README: the rewrite with the hub's install line, Hub section and push command put back
+actor claude-code
+at 2026-10-27T17:55:38.3666446Z

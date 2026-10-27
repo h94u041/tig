@@ -1,0 +1,194 @@
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.}} · tig hub</title>
+<style>
+:root {
+  --bg: #fbfaf7; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a64; --line: #e4e1d8;
+  --accent: #2f5d8a; --code: #f2efe7;
+  --guideline: #2e7d4f; --guideline-bg: #e3f2e8;
+  --direction: #9a6a00; --direction-bg: #fbefd2;
+  --open: #b3261e; --open-bg: #fbe3e1;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161614; --panel: #1f1f1c; --ink: #e9e7e0; --muted: #a09e95; --line: #34332e;
+    --accent: #8db7e0; --code: #2a2925;
+    --guideline: #7fcf9c; --guideline-bg: #1f3427;
+    --direction: #e8c063; --direction-bg: #3a3020;
+    --open: #f19a92; --open-bg: #3d2321;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.6 system-ui, -apple-system, "Segoe UI", "Noto Sans TC", sans-serif; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+header.top { border-bottom: 1px solid var(--line); background: var(--panel); }
+header.top .in, main { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+header.top .in { display: flex; align-items: center; gap: 12px; height: 52px; }
+header.top .brand { font-weight: 700; color: var(--ink); letter-spacing: .02em; }
+header.top .crumbs { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+main { padding-top: 24px; padding-bottom: 64px; }
+h1 { font-size: 26px; margin: 0 0 6px; overflow-wrap: anywhere; }
+h2.sec { font-size: 15px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 32px 0 10px; }
+.sub { color: var(--muted); margin: 0 0 16px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin: 18px 0; }
+.stat { padding: 12px 14px; }
+.stat b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--muted); font-size: 13px; }
+.badge { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px;
+  white-space: nowrap; vertical-align: middle; }
+.badge.guideline, .badge.closed { color: var(--guideline); background: var(--guideline-bg); }
+.badge.direction { color: var(--direction); background: var(--direction-bg); }
+.badge.open, .badge.notclosed { color: var(--open); background: var(--open-bg); }
+.badge.none { color: var(--muted); background: var(--code); }
+table { width: 100%; border-collapse: collapse; }
+td, th { text-align: left; padding: 9px 14px; border-top: 1px solid var(--line); vertical-align: top; }
+tr:first-child td, tr:first-child th { border-top: 0; }
+th { font-weight: 600; color: var(--muted); font-size: 13px; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.scroll { overflow-x: auto; }
+code, .hash { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px; }
+.hash { color: var(--muted); }
+.outline a.row { display: flex; gap: 10px; align-items: baseline; padding: 4px 14px; color: var(--ink); }
+.outline a.row:hover { background: var(--code); text-decoration: none; }
+.outline .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.outline .docrow { font-weight: 600; padding-top: 10px; }
+ul.findings { margin: 0; padding: 10px 14px 10px 32px; }
+ul.findings li { margin: 3px 0; }
+.block { display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 20px; padding: 6px 0;
+  border-top: 1px dashed var(--line); scroll-margin-top: 16px; }
+.block:first-child { border-top: 0; }
+.block:target { background: var(--code); border-radius: 8px; }
+.block .meta { font-size: 13px; color: var(--muted); padding-top: 14px; }
+.block .meta div { margin-bottom: 4px; overflow-wrap: anywhere; }
+.prose { min-width: 0; overflow-wrap: anywhere; }
+.prose pre { background: var(--code); padding: 12px 14px; border-radius: 8px; overflow-x: auto; }
+.prose :not(pre) > code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
+.prose table { margin: 10px 0; border: 1px solid var(--line); }
+.prose table td, .prose table th { padding: 6px 10px; }
+.prose h1, .prose h2, .prose h3, .prose h4 { margin: 14px 0 6px; }
+.doc { padding: 8px 22px 16px; }
+.empty { padding: 28px; text-align: center; color: var(--muted); }
+@media (max-width: 720px) {
+  .block { grid-template-columns: 1fr; gap: 0; }
+  .block .meta { padding-top: 0; order: 2; }
+  .doc { padding: 6px 14px 12px; }
+  td, th { padding: 8px 10px; }
+}
+</style>
+</head>
+<body>
+{{end}}
+
+{{define "top"}}<header class="top"><div class="in"><a class="brand" href="/">tig hub</a>
+{{if .}}<span class="crumbs">/ <a href="{{.Base}}">{{.Owner}}/{{.Name}}</a></span>{{end}}</div></header>{{end}}
+
+{{define "status"}}{{if .}}<span class="badge {{.}}">{{.}}</span>{{else}}<span class="badge none">no design</span>{{end}}{{end}}
+
+{{define "closed"}}{{if .}}<span class="badge closed">closed</span>{{else}}<span class="badge notclosed">not closed</span>{{end}}{{end}}
+
+{{define "index"}}{{template "head" "Projects"}}{{template "top"}}
+<main>
+<h1>Projects</h1>
+<p class="sub">Each project's documents and chain, as its owner last pushed them. The code stays with the project.</p>
+<div class="panel scroll">
+{{if .}}<table>
+<tr><th>Project</th><th>Chain</th><th class="num">Docs</th><th class="num">Guidelines</th><th class="num">Directions</th><th>Pushed</th></tr>
+{{range .}}<tr>
+<td><a href="/{{.Owner}}/{{.Name}}">{{.Owner}}/{{.Name}}</a></td>
+<td>{{template "closed" .Chain.Report.Closed}}</td>
+<td class="num">{{.Chain.Report.Docs}}</td>
+<td class="num">{{.Chain.Report.Guidelines}}</td>
+<td class="num">{{.Chain.Report.Directions}}</td>
+<td>{{when .Head.At}}</td>
+</tr>{{end}}
+</table>{{else}}<div class="empty">Nothing pushed yet. <code>tigprint push http://this-hub/owner/name</code></div>{{end}}
+</div>
+</main></body></html>{{end}}
+
+{{define "project"}}{{template "head" (printf "%s/%s" .Owner .Name)}}{{template "top" .}}
+<main>
+<h1>{{.Owner}}/{{.Name}} {{template "closed" .Chain.Report.Closed}}</h1>
+<p class="sub">Main document <a href="{{docURL .Base .Chain.Root}}">{{.Chain.Root}}</a> ·
+pushed {{when .Head.At}}{{if .Head.Actor}} by {{.Head.Actor}}{{end}}{{if .Head.Note}} · “{{.Head.Note}}”{{end}} ·
+<a href="{{.Base}}/log">publications</a> · <a href="/api/v1/projects/{{.Owner}}/{{.Name}}">JSON</a></p>
+
+<div class="stats">
+<div class="panel stat"><b>{{.Chain.Report.Docs}}</b><span>documents</span></div>
+<div class="panel stat"><b>{{.Chain.Report.Blocks}}</b><span>blocks</span></div>
+<div class="panel stat"><b>{{.Chain.Report.Guidelines}}</b><span>guidelines</span></div>
+<div class="panel stat"><b>{{.Chain.Report.Directions}}</b><span>directions</span></div>
+<div class="panel stat"><b>{{.Chain.Report.Verify}}</b><span>verify</span></div>
+</div>
+
+<h2 class="sec">Documents</h2>
+<div class="panel scroll"><table>
+<tr><th>Document</th><th class="num">Guidelines</th><th class="num">Directions</th><th class="num">Open</th></tr>
+{{range .Docs}}<tr><td><a href="{{docURL $.Base .Path}}">{{.Path}}</a></td>
+<td class="num">{{.Guidelines}}</td><td class="num">{{.Directions}}</td><td class="num">{{.Open}}</td></tr>{{end}}
+</table></div>
+
+{{with .Chain.Report}}
+{{if .Broken}}<h2 class="sec">Broken</h2><div class="panel"><ul class="findings">{{range .Broken}}<li><code>{{.Path}}</code>{{if .Line}}:{{.Line}}{{end}} {{.Message}}</li>{{end}}</ul></div>{{end}}
+{{if .Open}}<h2 class="sec">Open</h2><div class="panel"><ul class="findings">{{range .Open}}<li><a href="{{docURL $.Base .Path}}#b-{{short .Block}}"><code>{{.Path}}</code>{{if .Line}}:{{.Line}}{{end}}</a>{{if .Title}} ({{.Title}}){{end}}: {{.Message}}</li>{{end}}</ul></div>{{end}}
+{{if .Stale}}<h2 class="sec">Stale</h2><div class="panel"><ul class="findings">{{range .Stale}}<li><code>{{.Path}}</code>{{if .Title}} ({{.Title}}){{end}}: {{.Message}}</li>{{end}}</ul></div>{{end}}
+{{if .Undesigned}}<h2 class="sec">No design reaches</h2><div class="panel"><ul class="findings">{{range .Undesigned}}<li><code>{{.}}</code></li>{{end}}</ul></div>{{end}}
+{{end}}
+
+<h2 class="sec">Outline</h2>
+<div class="panel outline">
+{{range .Chain.Blocks}}{{if eq .Level 0}}<a class="row docrow" href="{{docURL $.Base .Path}}"><span class="title">{{.Path}}</span></a>
+{{else}}<a class="row" href="{{docURL $.Base .Path}}#b-{{short .Hash}}"><span class="title" style="padding-left:{{indent .Level}}px">{{.Title}}</span>{{if .Status}}{{template "status" .Status}}{{end}}<span class="hash">{{short .Hash}}</span></a>
+{{end}}{{end}}
+</div>
+
+{{if .Chain.Report.Acceptance}}<h2 class="sec">Acceptance</h2>
+<div class="panel scroll"><table>
+<tr><th>Accepts</th><th>Command</th><th>Result</th><th>Last run</th></tr>
+{{range .Chain.Report.Acceptance}}{{$acc := .}}{{range .Commands}}<tr>
+<td><a href="{{docURL $.Base $acc.Path}}#b-{{short $acc.Block}}">{{$acc.Accepts}}</a></td>
+<td><code>{{.Command}}</code></td>
+<td><span class="badge {{if eq .Result "passed"}}guideline{{else if eq .Result "failed"}}open{{else}}none{{end}}">{{.Result}}</span></td>
+<td>{{when .At}}{{if .Runner}} by {{.Runner}}{{end}}</td>
+</tr>{{end}}{{end}}
+</table></div>{{end}}
+</main></body></html>{{end}}
+
+{{define "doc"}}{{template "head" .Doc}}{{template "top" .}}
+<main>
+<h1>{{.Doc}}</h1>
+<p class="sub">From the publication of {{when .Head.At}}. Statuses are the chain's; files linked from the text are named, not kept here.</p>
+<div class="panel doc">
+{{range .Blocks}}<section class="block" id="{{.ID}}">
+<div class="prose">{{if .Anchor}}<a id="{{.Anchor}}"></a>{{end}}{{.HTML}}</div>
+<div class="meta">
+{{with .View}}{{if .Status}}<div>{{template "status" .Status}}</div>{{end}}
+{{if .Cover}}<div>accepted by <a href="#b-{{short .Cover}}">{{short .Cover}}</a></div>{{end}}
+{{if .Accept}}<div>{{len .Accept}} acceptance command{{if gt (len .Accept) 1}}s{{end}}</div>{{end}}
+{{range .Details}}<div>details: <a href="{{docURL $.Base .}}">{{.}}</a></div>{{end}}
+{{range .Refs}}<div>links <code>{{.}}</code></div>{{end}}
+{{range .Built}}<div>built <code>{{.}}</code></div>{{end}}{{end}}
+<div class="hash">{{short .Hash}}</div>
+</div>
+</section>{{end}}
+</div>
+</main></body></html>{{end}}
+
+{{define "log"}}{{template "head" (printf "%s/%s publications" .Owner .Name)}}{{template "top" .}}
+<main>
+<h1>Publications</h1>
+<p class="sub">Every push of {{.Owner}}/{{.Name}}, newest first.</p>
+<div class="panel scroll"><table>
+<tr><th>Publication</th><th>Pushed</th><th>By</th><th>Chain</th><th class="num">Guidelines</th><th>Note</th></tr>
+{{range .Rows}}<tr>
+<td class="hash">{{short .ID}}</td><td>{{when .At}}</td><td>{{.Actor}}</td>
+<td>{{with .Chain}}{{template "closed" .Report.Closed}}{{end}}</td>
+<td class="num">{{with .Chain}}{{.Report.Guidelines}}{{end}}</td><td>{{.Note}}</td>
+</tr>{{end}}
+</table></div>
+</main></body></html>{{end}}

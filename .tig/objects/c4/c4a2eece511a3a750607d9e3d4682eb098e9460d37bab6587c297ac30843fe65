@@ -1,0 +1,9 @@
+tig-step 1
+kind edit
+basis a1603b4d66ca8efd2d68a63a63256f86207bebdbadfe3806b5ee76ea8448fbbb
+basis ef6df66df978689c2023a0878200b99352601a4a3fddb3da53ed94bdc081077a
+before 882518d74ad11dbb0203e6357550177c7b93d505ec316149367e561870b8e10c
+after 904e4a83f2115731d21d9cec4609b4025cb54d123f14406d16295e51509b9f88
+note the hub: tigprint push sends the documents and the chain only; tighub checks a push before it keeps it and shows the chain
+actor claude-code
+at 2026-10-27T17:47:58.0675401Z

@@ -1,0 +1,7 @@
+tig-snapshot 1
+tree 904e4a83f2115731d21d9cec4609b4025cb54d123f14406d16295e51509b9f88
+parent 84f55121c10c84dcb0d2c9791afbc4bc5dc7cfdff8aeeffd1b783ee7231daedf
+at 2026-10-27T17:48:14.5772526Z
+reason after-construction
+actor claude-code
+lineage f7d5bdfd3bcbc1a10f28cb40f77a0a593faf084cfb86f27fba25cf0f823a3f64
