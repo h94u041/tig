@@ -1,0 +1,9 @@
+tig-step 1
+kind check
+basis e449821c420f6b7a711326892d2308bed599bcf83dd54a4141839440e7638c3a
+command go test ./...
+exit 0
+output bf8d74ac6c777c5bbda6e09f2226cbae04ebc6d662726f8ff99e214e7fde33cd
+runner tig
+actor claude-code
+at 2026-10-27T16:43:53.6530432Z

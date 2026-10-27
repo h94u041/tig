@@ -1,0 +1,8 @@
+tig-step 1
+kind check
+basis e449821c420f6b7a711326892d2308bed599bcf83dd54a4141839440e7638c3a
+command go vet ./...
+exit 0
+runner tig
+actor claude-code
+at 2026-10-27T16:43:44.1883743Z

@@ -1,0 +1,39 @@
+# Footprint
+
+What tig records about how a project was built, and how it keeps it safe.
+
+## Objects and trees
+
+Every file is stored once, as an object named by the SHA-256 of its content. Objects are stored plain, so Git delta-compresses them along with the project, and every read checks the content against the name: a tampered object is refused. A tree is one folder of the project, one line per entry; a folder that did not change is the same tree, so comparing two trees skips everything that did not change. Code: [objects.go](../objects.go), [tree.go](../tree.go), [record.go](../record.go).
+
+Which files: in a Git repository, Git's own list (tracked, and untracked but not ignored); otherwise every file, without `.git`, `.tig` and the folders the caller skips. A local cache of file sizes and times keeps unchanged files from being hashed again. Code: [files.go](../files.go), [statcache.go](../statcache.go).
+
+A file's hash is of its bytes, line endings included. A project whose footprint should hold on every platform keeps its line endings fixed in Git, as this repository does with [.gitattributes](../.gitattributes).
+
+## Snapshots
+
+A snapshot records the project's tree, the snapshot before it, when, why and by whom, and how the documents' text blocks changed since (see [the chain](chain.md)). A snapshot is taken only when something changed. Code: [snapshot.go](../snapshot.go), [repo.go](../repo.go).
+
+Putting files back from a snapshot refuses any path that could land outside the project or inside `.git` or `.tig`, Windows names such as `.. ` or `a:b` included, and never writes through a symbolic link, because trees can come from someone else's repository.
+
+## Works and steps
+
+A work is one construction: the text blocks it is for, what it was meant to do, the snapshots before and after it, its steps in order, and its result. A step is one thing done in it:
+
+| Kind | What tig records |
+|---|---|
+| `edit` | the trees before and after the step: exactly the files it changed |
+| `command`, `install` | the command, and the trees around it when it changed files |
+| `check` | a command run to check the design, its exit code and output, and who ran it (`tig` when tig ran it itself) |
+| `decision` | a question and its answer |
+| `note` | anything else |
+
+The work in progress lives in `.tig/WORK`, which stays on the machine. Finishing it writes the steps, then the work, and moves the `WORKS` head. Without a result given, the result comes from the checks: `passed` when every command's last check passed, `failed` when one did not, `done` when there was no check. Code: [work.go](../work.go).
+
+Several processes can use one `.tig` at once: the heads move under a lock file, and so does the work in progress, so no record is lost. Code: [lock.go](../lock.go).
+
+## Acceptance
+
+The tests in [tig_test.go](../tig_test.go) and [work_test.go](../work_test.go):
+
+- `go test -run "Snapshot|Objects|Restore|Trees|Records|Executable|Work" .`

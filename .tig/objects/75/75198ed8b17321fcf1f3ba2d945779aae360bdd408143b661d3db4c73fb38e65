@@ -1,0 +1,8 @@
+tig-step 1
+kind edit
+basis 597dd74c59ca80471ee86751f5f834ca662796638109eb36b6783981fcf57ead
+before 8cec6ae77429e7d4c138d283775f964f9c77ff2f3da26e99d3d3ca407e413577
+after 7208ea66eae78bafc709254134d30dabe84266fdaf848896cdc4aeb2dc97dedb
+note move the library into tig/; module tigprint; README and docs follow
+actor claude-code
+at 2026-10-27T16:41:39.988862Z

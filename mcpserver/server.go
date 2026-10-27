@@ -1,0 +1,671 @@
+// Package mcpserver serves a project's tig as an MCP server. Any agent that
+// speaks MCP can read the project's documents as one chain, follow it down to
+// the files built for it, see the footprint of how it was built, check
+// whether the chain is closed, and leave its own footprint while it works.
+package mcpserver
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/Justyr/tig"
+)
+
+// Options are how the server behaves.
+type Options struct {
+	Version string
+	// AllowRun lets check run an acceptance section's commands. Off, an
+	// agent cannot make tig run anything: a document it has just edited could
+	// say anything.
+	AllowRun bool
+}
+
+// New is an MCP server over the project's tig.
+func New(r *tig.Repo, opts Options) *mcp.Server {
+	s := mcp.NewServer(&mcp.Implementation{Name: "tig", Version: opts.Version}, &mcp.ServerOptions{Instructions: instructions})
+	h := handlers{r: r, allowRun: opts.AllowRun}
+	mcp.AddTool(s, &mcp.Tool{Name: "overview", Description: "Start here. The project's main document as an outline of text blocks (hash, title, status), whether the chain of documents is closed, how many blocks are guidelines (built and accepted) or directions (designed, not accepted yet), and any work in progress."}, h.overview)
+	mcp.AddTool(s, &mcp.Tool{Name: "search", Description: "Find text blocks, works, steps and files containing every word of a query. Keyword search only: no hit does not mean the project has nothing on it under other words."}, h.search)
+	mcp.AddTool(s, &mcp.Tool{Name: "read_block", Description: "Read one text block: its text, where it sits, its status and acceptance, the detail documents it hands on to, the files linked or built for it, what it was before it changed, and the latest works done for it."}, h.readBlock)
+	mcp.AddTool(s, &mcp.Tool{Name: "follow", Description: "Walk the chain from a block: down (its sections, the detail documents it hands on to, the files linked or built for it) or up (the sections and documents above it)."}, h.follow)
+	mcp.AddTool(s, &mcp.Tool{Name: "trail", Description: "The footprint: the works done for a block (and everything under it and its detail documents) or for a file, newest first. With steps, each work's steps and the files each step changed, so you can follow how it was built."}, h.trail)
+	mcp.AddTool(s, &mcp.Tool{Name: "read_file", Description: "Read a project file as it is now, or as it was in a tree from the footprint (a step's after tree, a snapshot's tree)."}, h.readFile)
+	mcp.AddTool(s, &mcp.Tool{Name: "check", Description: "Check whether the chain is closed: broken links and orphan documents, design no acceptance covers, stale links between design and code, files no design reaches, and how each acceptance last went. Give run to have tig itself run one acceptance section's commands (only the commands written in the documents run, and only when the server allows it)."}, h.check)
+	mcp.AddTool(s, &mcp.Tool{Name: "start_work", Description: "Start a work (one construction) before changing the project: say which text blocks it is for and what it is meant to do. tig takes a snapshot. One work at a time."}, h.startWork)
+	mcp.AddTool(s, &mcp.Tool{Name: "record_step", Description: "Record one step of the work in progress: edit (tig records the files the step changed), command, install, check (a command you ran to check the design, with its exit code and output), decision (a question and its answer) or note."}, h.recordStep)
+	mcp.AddTool(s, &mcp.Tool{Name: "finish_work", Description: "Finish the work in progress. tig takes a snapshot and writes the work with its steps. Without a result, it comes from the checks: passed, failed, or done when there was none."}, h.finishWork)
+	mcp.AddTool(s, &mcp.Tool{Name: "propose_link", Description: "Propose that a text block belongs with a file or another block. It is recorded as inferred, not observed."}, h.proposeLink)
+	for _, kind := range []string{"block", "work", "step", "object"} {
+		s.AddResourceTemplate(&mcp.ResourceTemplate{Name: kind, URITemplate: "tig://" + kind + "/{hash}", MIMEType: mimeOf(kind),
+			Description: "A " + kind + " by its hash."}, h.resource)
+	}
+	return s
+}
+
+const instructions = `This server is a project's tig: its documents as one chain (the main document, the detail documents it links to, their text blocks) and the footprint of how the project was built (works and their steps).
+
+Before changing the project: overview, then read_block and follow the blocks your change is about, and trail them to see how they were built. Then start_work with those blocks as the basis, record_step as you go (edit after you change files, check after you run an acceptance), and finish_work. Run check to see whether the chain is still closed.
+
+Every block is named by its content hash; any unique prefix of 8 or more characters works. A block that changes gets a new hash; read_block shows what it was before.`
+
+func mimeOf(kind string) string {
+	if kind == "block" {
+		return "text/markdown"
+	}
+	if kind == "object" {
+		return "text/plain"
+	}
+	return "application/json"
+}
+
+type handlers struct {
+	r        *tig.Repo
+	allowRun bool
+}
+
+func (h handlers) analyze(ctx context.Context) (*tig.Analysis, error) { return h.r.Analyze(ctx, "") }
+
+// actor is who is calling: the MCP client's name, unless the call says.
+func actor(req *mcp.CallToolRequest, given string) string {
+	if given != "" {
+		return given
+	}
+	if req != nil && req.Session != nil {
+		if p := req.Session.InitializeParams(); p != nil && p.ClientInfo != nil && p.ClientInfo.Name != "" {
+			return p.ClientInfo.Name
+		}
+	}
+	return "mcp-client"
+}
+
+func page(n, cursor, limit, def int) (int, int, int) {
+	if limit <= 0 {
+		limit = def
+	}
+	if cursor < 0 || cursor > n {
+		cursor = n
+	}
+	end := min(cursor+limit, n)
+	next := 0
+	if end < n {
+		next = end
+	}
+	return cursor, end, next
+}
+
+type overviewIn struct {
+	Limit  int `json:"limit,omitempty" jsonschema:"how many blocks of the outline to list (default 200)"`
+	Cursor int `json:"cursor,omitempty" jsonschema:"where to continue the outline (the next value of the last answer)"`
+}
+
+type outlineItem struct {
+	Block  string `json:"block"`
+	Path   string `json:"path"`
+	Level  int    `json:"level"`
+	Title  string `json:"title"`
+	Status string `json:"status,omitempty"`
+}
+
+type overviewOut struct {
+	Root       string        `json:"root"`
+	Closed     bool          `json:"closed"`
+	Verify     string        `json:"verify"`
+	Docs       []string      `json:"docs"`
+	Guidelines int           `json:"guidelines"`
+	Directions int           `json:"directions"`
+	Open       int           `json:"open"`
+	Broken     int           `json:"broken"`
+	Stale      int           `json:"stale"`
+	Undesigned int           `json:"undesigned"`
+	Works      int           `json:"works"`
+	InProgress *tig.OpenWork `json:"inProgress,omitempty"`
+	Outline    []outlineItem `json:"outline"`
+	Next       int           `json:"next,omitempty"`
+}
+
+func (h handlers) overview(ctx context.Context, _ *mcp.CallToolRequest, in overviewIn) (*mcp.CallToolResult, overviewOut, error) {
+	a, err := h.analyze(ctx)
+	if err != nil {
+		return nil, overviewOut{}, err
+	}
+	rep := a.Report
+	out := overviewOut{Root: rep.Root, Closed: rep.Closed, Verify: rep.Verify, Docs: a.Chain.Docs, Guidelines: rep.Guidelines,
+		Directions: rep.Directions, Open: len(rep.Open), Broken: len(rep.Broken), Stale: len(rep.Stale), Undesigned: len(rep.Undesigned)}
+	for _, w := range a.Works() {
+		if w.ID != "" {
+			out.Works++
+		}
+	}
+	out.InProgress, _ = h.r.Current()
+	from, to, next := page(len(a.Chain.Order), in.Cursor, in.Limit, 200)
+	for _, hash := range a.Chain.Order[from:to] {
+		b := a.Chain.Blocks[hash]
+		out.Outline = append(out.Outline, outlineItem{Block: hash, Path: b.Path, Level: b.Level, Title: b.Title, Status: a.Status[hash]})
+	}
+	out.Next = next
+	return nil, out, nil
+}
+
+type searchIn struct {
+	Query  string `json:"query" jsonschema:"the words to find"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"how many hits (default 50)"`
+	Cursor int    `json:"cursor,omitempty"`
+}
+
+type searchOut struct {
+	Hits []tig.Hit `json:"hits"`
+	Next int       `json:"next,omitempty"`
+	Note string    `json:"note"`
+}
+
+func (h handlers) search(ctx context.Context, _ *mcp.CallToolRequest, in searchIn) (*mcp.CallToolResult, searchOut, error) {
+	a, err := h.analyze(ctx)
+	if err != nil {
+		return nil, searchOut{}, err
+	}
+	files, _ := tig.Files(ctx, h.r.Root, h.r.Skip)
+	hits := a.Search(in.Query, files)
+	from, to, next := page(len(hits), in.Cursor, in.Limit, 50)
+	return nil, searchOut{Hits: hits[from:to], Next: next, Note: "keyword search: every hit contains all the words; other wordings are not found"}, nil
+}
+
+type blockIn struct {
+	Block string `json:"block" jsonschema:"the block's hash, or a unique prefix of 8 or more characters"`
+}
+
+type ref struct {
+	Block string `json:"block"`
+	Path  string `json:"path,omitempty"`
+	Title string `json:"title"`
+}
+
+type workSummary struct {
+	Work   string    `json:"work"`
+	Intent string    `json:"intent"`
+	Result string    `json:"result"`
+	Actor  string    `json:"actor,omitempty"`
+	At     time.Time `json:"at,omitzero"`
+	Steps  int       `json:"steps"`
+}
+
+type blockOut struct {
+	tig.Block
+	Status     string          `json:"status,omitempty"`
+	AcceptedBy string          `json:"acceptedBy,omitempty"`
+	Above      string          `json:"parentTitle,omitempty"`
+	Children   []ref           `json:"children,omitempty"`
+	Details    []ref           `json:"details,omitempty"`
+	Files      []string        `json:"files,omitempty"`
+	Built      []string        `json:"built,omitempty"`
+	Before     []string        `json:"before,omitempty"`
+	Stale      []tig.Finding   `json:"stale,omitempty"`
+	Acceptance *tig.Acceptance `json:"acceptance,omitempty"`
+	Works      []workSummary   `json:"works,omitempty"`
+}
+
+func summary(w tig.Work) workSummary {
+	return workSummary{Work: w.ID, Intent: w.Intent, Result: w.Result, Actor: w.Actor, At: w.At, Steps: len(w.Steps)}
+}
+
+func (h handlers) readBlock(ctx context.Context, _ *mcp.CallToolRequest, in blockIn) (*mcp.CallToolResult, blockOut, error) {
+	a, err := h.analyze(ctx)
+	if err != nil {
+		return nil, blockOut{}, err
+	}
+	c := a.Chain
+	b, err := c.Block(in.Block)
+	if err != nil {
+		return nil, blockOut{}, err
+	}
+	out := blockOut{Block: *b, Status: a.Status[b.Hash], AcceptedBy: a.Cover[b.Hash], Files: c.Refs[b.Hash], Built: a.Built[b.Hash]}
+	if p := c.Blocks[b.Parent]; p != nil {
+		out.Above = p.Title
+	}
+	for _, k := range c.Children[b.Hash] {
+		out.Children = append(out.Children, ref{Block: k, Title: c.Blocks[k].Title})
+	}
+	for _, doc := range c.Details[b.Hash] {
+		if root := c.DocBlock[doc]; root != "" {
+			out.Details = append(out.Details, ref{Block: root, Path: doc, Title: doc})
+		}
+	}
+	for _, m := range a.Before(b.Hash) {
+		out.Before = append(out.Before, m.Old)
+	}
+	for _, f := range a.Report.Stale {
+		if f.Block == b.Hash {
+			out.Stale = append(out.Stale, f)
+		}
+	}
+	for i := range a.Report.Acceptance {
+		if a.Report.Acceptance[i].Block == b.Hash {
+			out.Acceptance = &a.Report.Acceptance[i]
+		}
+	}
+	for i, w := range a.Trail(b.Hash) {
+		if i == 5 {
+			break
+		}
+		out.Works = append(out.Works, summary(w))
+	}
+	return nil, out, nil
+}
+
+type followIn struct {
+	Block     string `json:"block" jsonschema:"where to start"`
+	Direction string `json:"direction,omitempty" jsonschema:"down (default) or up"`
+	Depth     int    `json:"depth,omitempty" jsonschema:"how many steps away (default 2, at most 10)"`
+	Limit     int    `json:"limit,omitempty" jsonschema:"how many blocks at most (default 100)"`
+}
+
+type node struct {
+	Block string   `json:"block"`
+	Path  string   `json:"path"`
+	Title string   `json:"title"`
+	Level int      `json:"level"`
+	Via   string   `json:"via"` // section, detail, parent, handed-on-from
+	Depth int      `json:"depth"`
+	Files []string `json:"files,omitempty"`
+}
+
+type followOut struct {
+	Nodes []node `json:"nodes"`
+	More  bool   `json:"more,omitempty"`
+}
+
+func (h handlers) follow(ctx context.Context, _ *mcp.CallToolRequest, in followIn) (*mcp.CallToolResult, followOut, error) {
+	a, err := h.analyze(ctx)
+	if err != nil {
+		return nil, followOut{}, err
+	}
+	c := a.Chain
+	start, err := c.Block(in.Block)
+	if err != nil {
+		return nil, followOut{}, err
+	}
+	depth := in.Depth
+	if depth <= 0 {
+		depth = 2
+	}
+	depth = min(depth, 10)
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	type item struct {
+		hash, via string
+		d         int
+	}
+	var out followOut
+	seen := map[string]bool{start.Hash: true}
+	queue := []item{{start.Hash, "start", 0}}
+	for len(queue) > 0 {
+		it := queue[0]
+		queue = queue[1:]
+		b := c.Blocks[it.hash]
+		if len(out.Nodes) == limit {
+			out.More = true
+			break
+		}
+		files := append(append([]string{}, c.Refs[it.hash]...), a.Built[it.hash]...)
+		out.Nodes = append(out.Nodes, node{Block: it.hash, Path: b.Path, Title: b.Title, Level: b.Level, Via: it.via, Depth: it.d, Files: files})
+		if it.d == depth {
+			continue
+		}
+		var next []item
+		if in.Direction == "up" {
+			if b.Parent != "" {
+				next = append(next, item{b.Parent, "parent", it.d + 1})
+			}
+			if b.Level == 0 {
+				for from, docs := range c.Details {
+					for _, doc := range docs {
+						if doc == b.Path {
+							next = append(next, item{from, "handed-on-from", it.d + 1})
+						}
+					}
+				}
+			}
+		} else {
+			for _, k := range c.Children[it.hash] {
+				next = append(next, item{k, "section", it.d + 1})
+			}
+			for _, doc := range c.Details[it.hash] {
+				if root := c.DocBlock[doc]; root != "" {
+					next = append(next, item{root, "detail", it.d + 1})
+				}
+			}
+		}
+		for _, n := range next {
+			if !seen[n.hash] {
+				seen[n.hash] = true
+				queue = append(queue, n)
+			}
+		}
+	}
+	return nil, out, nil
+}
+
+type trailIn struct {
+	Block  string `json:"block,omitempty" jsonschema:"a block: its works, and those of everything under it and its detail documents"`
+	File   string `json:"file,omitempty" jsonschema:"or a project file: the works that changed it"`
+	Steps  bool   `json:"steps,omitempty" jsonschema:"include each work's steps"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"how many works (default 20)"`
+	Cursor int    `json:"cursor,omitempty"`
+}
+
+type stepOut struct {
+	tig.Step
+	Changes    []tig.Change `json:"changes,omitempty"`
+	OutputText string       `json:"outputText,omitempty"`
+}
+
+type workOut struct {
+	tig.Work
+	StepList []stepOut `json:"stepList,omitempty"`
+}
+
+type trailOut struct {
+	Works []workOut `json:"works"`
+	Next  int       `json:"next,omitempty"`
+}
+
+const maxText = 64 << 10
+
+func (h handlers) trail(ctx context.Context, _ *mcp.CallToolRequest, in trailIn) (*mcp.CallToolResult, trailOut, error) {
+	a, err := h.analyze(ctx)
+	if err != nil {
+		return nil, trailOut{}, err
+	}
+	var works []tig.Work
+	switch {
+	case in.Block != "":
+		b, err := a.Chain.Block(in.Block)
+		if err != nil {
+			return nil, trailOut{}, err
+		}
+		works = a.Trail(b.Hash)
+	case in.File != "":
+		works = a.FileTrail(ctx, in.File)
+	default:
+		works = a.Works()
+	}
+	from, to, next := page(len(works), in.Cursor, in.Limit, 20)
+	out := trailOut{Next: next}
+	for _, w := range works[from:to] {
+		wo := workOut{Work: w}
+		if in.Steps {
+			for _, s := range a.Steps(w) {
+				so := stepOut{Step: s}
+				if s.Before != "" && s.After != "" {
+					so.Changes, _ = tig.DiffTrees(ctx, h.r.Objects, s.Before, s.After)
+				}
+				if s.Output != "" {
+					if data, err := h.r.Objects.GetObject(ctx, s.Output); err == nil {
+						so.OutputText = clipText(data)
+					}
+				}
+				wo.StepList = append(wo.StepList, so)
+			}
+		}
+		out.Works = append(out.Works, wo)
+	}
+	return nil, out, nil
+}
+
+func clipText(data []byte) string {
+	if !utf8.Valid(data) {
+		return fmt.Sprintf("[%d bytes, not text]", len(data))
+	}
+	if len(data) > maxText {
+		return string(data[:maxText]) + fmt.Sprintf("\n[cut: %d bytes in all]", len(data))
+	}
+	return string(data)
+}
+
+type readFileIn struct {
+	Path   string `json:"path" jsonschema:"the project file"`
+	Tree   string `json:"tree,omitempty" jsonschema:"a tree from the footprint (a step's after, a snapshot's tree); empty for the file as it is now"`
+	Offset int    `json:"offset,omitempty" jsonschema:"where to continue a long file (the next value of the last answer)"`
+}
+
+type readFileOut struct {
+	Path    string `json:"path"`
+	Exists  bool   `json:"exists"`
+	Hash    string `json:"hash,omitempty"`
+	Size    int    `json:"size,omitempty"`
+	Binary  bool   `json:"binary,omitempty"`
+	Content string `json:"content,omitempty"`
+	Next    int    `json:"next,omitempty"`
+}
+
+func (h handlers) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readFileIn) (*mcp.CallToolResult, readFileOut, error) {
+	out := readFileOut{Path: in.Path}
+	var data []byte
+	if in.Tree != "" {
+		data, out.Exists = h.r.Content(ctx, in.Tree, in.Path)
+	} else {
+		var err error
+		data, err = h.r.ReadFile(ctx, in.Path)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, out, err
+		}
+		out.Exists = err == nil
+	}
+	if !out.Exists {
+		return nil, out, nil
+	}
+	out.Hash, out.Size = tig.HashOf(data), len(data)
+	if !utf8.Valid(data) {
+		out.Binary = true
+		return nil, out, nil
+	}
+	from := min(max(in.Offset, 0), len(data))
+	for from < len(data) && !utf8.RuneStart(data[from]) {
+		from++
+	}
+	end := min(from+maxText, len(data))
+	for end < len(data) && !utf8.RuneStart(data[end]) {
+		end--
+	}
+	out.Content = string(data[from:end])
+	if end < len(data) {
+		out.Next = end
+	}
+	return nil, out, nil
+}
+
+type checkIn struct {
+	Run   string `json:"run,omitempty" jsonschema:"an acceptance block to run first: tig runs its commands itself"`
+	Limit int    `json:"limit,omitempty" jsonschema:"how many files without design to list (default 100)"`
+}
+
+type checkOut struct {
+	tig.Report
+	UndesignedCount int        `json:"undesignedCount"`
+	Ran             []tig.Step `json:"ran,omitempty"`
+}
+
+func (h handlers) check(ctx context.Context, req *mcp.CallToolRequest, in checkIn) (*mcp.CallToolResult, checkOut, error) {
+	var out checkOut
+	if in.Run != "" {
+		if !h.allowRun {
+			return nil, out, errors.New("running acceptance is off on this server (start it with -run); run the commands yourself and record them as check steps")
+		}
+		steps, err := h.r.RunAcceptance(ctx, in.Run, actor(req, ""), 0)
+		if err != nil {
+			return nil, out, err
+		}
+		out.Ran = steps
+	}
+	a, err := h.analyze(ctx)
+	if err != nil {
+		return nil, out, err
+	}
+	out.Report = a.Report
+	out.UndesignedCount = len(out.Undesigned)
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if len(out.Undesigned) > limit {
+		out.Undesigned = out.Undesigned[:limit]
+	}
+	return nil, out, nil
+}
+
+type startIn struct {
+	Basis  []string `json:"basis" jsonschema:"the text blocks this work is for (hashes or prefixes)"`
+	Intent string   `json:"intent" jsonschema:"what the work is meant to do, in one line"`
+	Actor  string   `json:"actor,omitempty" jsonschema:"who is working (default: this MCP client's name)"`
+}
+
+func (h handlers) resolve(ctx context.Context, refs []string) ([]string, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	c, err := h.r.Chain(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(refs))
+	for _, x := range refs {
+		b, err := c.Block(x)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b.Hash)
+	}
+	return out, nil
+}
+
+func (h handlers) startWork(ctx context.Context, req *mcp.CallToolRequest, in startIn) (*mcp.CallToolResult, tig.OpenWork, error) {
+	basis, err := h.resolve(ctx, in.Basis)
+	if err != nil {
+		return nil, tig.OpenWork{}, err
+	}
+	w, err := h.r.StartWork(ctx, basis, in.Intent, actor(req, in.Actor))
+	if err != nil {
+		return nil, tig.OpenWork{}, err
+	}
+	return nil, *w, nil
+}
+
+type stepIn struct {
+	Kind    string   `json:"kind" jsonschema:"edit, command, install, check, decision or note"`
+	Basis   []string `json:"basis,omitempty" jsonschema:"the text blocks this step is for (default: the work's); for a check, the acceptance block"`
+	Note    string   `json:"note,omitempty" jsonschema:"what was done, in one line"`
+	Command string   `json:"command,omitempty" jsonschema:"the command that was run"`
+	Exit    *int     `json:"exit,omitempty" jsonschema:"its exit code"`
+	Output  string   `json:"output,omitempty" jsonschema:"its output"`
+	Detail  string   `json:"detail,omitempty" jsonschema:"a decision's question and answer, or a longer note"`
+	Actor   string   `json:"actor,omitempty"`
+}
+
+var stepKinds = map[string]bool{tig.StepEdit: true, tig.StepCommand: true, tig.StepInstall: true, tig.StepCheck: true, tig.StepDecision: true, tig.StepNote: true}
+
+func (h handlers) recordStep(ctx context.Context, req *mcp.CallToolRequest, in stepIn) (*mcp.CallToolResult, tig.Step, error) {
+	if !stepKinds[in.Kind] {
+		return nil, tig.Step{}, fmt.Errorf("unknown step kind %q", in.Kind)
+	}
+	basis, err := h.resolve(ctx, in.Basis)
+	if err != nil {
+		return nil, tig.Step{}, err
+	}
+	// A check reported by an agent never claims to be tig's own run.
+	s, err := h.r.RecordStep(ctx, tig.StepInput{Kind: in.Kind, Basis: basis, Note: in.Note, Command: in.Command, Exit: in.Exit,
+		Output: in.Output, Detail: in.Detail, Actor: actor(req, in.Actor)})
+	return nil, s, err
+}
+
+type finishIn struct {
+	Result    string   `json:"result,omitempty" jsonschema:"passed, failed, done, rolled-back or abandoned (default: from the checks)"`
+	Approvers []string `json:"approvers,omitempty" jsonschema:"who approved the work"`
+}
+
+func (h handlers) finishWork(ctx context.Context, _ *mcp.CallToolRequest, in finishIn) (*mcp.CallToolResult, tig.Work, error) {
+	switch in.Result {
+	case "", tig.ResultPassed, tig.ResultFailed, tig.ResultDone, tig.ResultRolledBack, tig.ResultAbandoned:
+	default:
+		return nil, tig.Work{}, fmt.Errorf("unknown result %q", in.Result)
+	}
+	w, err := h.r.FinishWork(ctx, in.Result, in.Approvers)
+	return nil, w, err
+}
+
+type linkIn struct {
+	From    string `json:"from" jsonschema:"the text block"`
+	ToBlock string `json:"toBlock,omitempty" jsonschema:"another block it belongs with"`
+	ToFile  string `json:"toFile,omitempty" jsonschema:"or a project file it belongs with"`
+	Kind    string `json:"kind,omitempty" jsonschema:"implements, tests, refines or references"`
+	Note    string `json:"note,omitempty" jsonschema:"why"`
+}
+
+func (h handlers) proposeLink(ctx context.Context, req *mcp.CallToolRequest, in linkIn) (*mcp.CallToolResult, tig.Link, error) {
+	refs := []string{in.From}
+	if in.ToBlock != "" {
+		refs = append(refs, in.ToBlock)
+	}
+	hashes, err := h.resolve(ctx, refs)
+	if err != nil {
+		return nil, tig.Link{}, err
+	}
+	l := tig.Link{From: hashes[0], ToFile: in.ToFile, Kind: in.Kind, Note: in.Note, Actor: actor(req, "")}
+	if len(hashes) > 1 {
+		l.ToBlock = hashes[1]
+	}
+	l, err = h.r.ProposeLink(ctx, l)
+	return nil, l, err
+}
+
+func (h handlers) resource(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+	uri := req.Params.URI
+	rest, ok := strings.CutPrefix(uri, "tig://")
+	if !ok {
+		return nil, mcp.ResourceNotFoundError(uri)
+	}
+	kind, hash, _ := strings.Cut(rest, "/")
+	var text string
+	switch kind {
+	case "block":
+		c, err := h.r.Chain(ctx, "")
+		if err != nil {
+			return nil, err
+		}
+		b, err := c.Block(hash)
+		if err != nil {
+			return nil, mcp.ResourceNotFoundError(uri)
+		}
+		text = "# " + strings.Join(b.Heading, " / ") + "\n\n" + b.Text + "\n"
+	case "work", "step":
+		var v any
+		var err error
+		if kind == "work" {
+			v, err = tig.LoadWork(ctx, h.r.Objects, hash)
+		} else {
+			v, err = tig.LoadStep(ctx, h.r.Objects, hash)
+		}
+		if err != nil {
+			return nil, mcp.ResourceNotFoundError(uri)
+		}
+		raw, _ := json.MarshalIndent(v, "", "  ")
+		text = string(raw)
+	case "object":
+		data, err := h.r.Objects.GetObject(ctx, hash)
+		if err != nil {
+			return nil, mcp.ResourceNotFoundError(uri)
+		}
+		text = clipText(data)
+	default:
+		return nil, mcp.ResourceNotFoundError(uri)
+	}
+	return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: uri, MIMEType: mimeOf(kind), Text: text}}}, nil
+}

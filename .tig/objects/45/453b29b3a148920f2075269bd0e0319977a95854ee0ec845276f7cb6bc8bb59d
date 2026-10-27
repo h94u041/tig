@@ -1,0 +1,98 @@
+# tigprint
+
+tigprint keeps a project's *tig*: the footprint of how the project was actually built, step by step, and its Markdown documents read as one chain, from the main document down to the files built for it. It serves both to agents over MCP: an agent can follow the design, see how it was built before, check its work against the design's acceptance, and leave its own footprint for the next one.
+
+The idea is *Markdown as source*. The documents are what you write; the code is built from them, by people or by agents; tig keeps the two together and tells you when they drift apart. Because the footprint is a faithful record of one construction, another agent given the documents and the footprint can build the same thing again.
+
+A tig lives in the project's `.tig` folder and goes into Git with the project. Go programs can use it directly through the package [tig](tig/). tigprint is written in Go ([go.mod](go.mod), [go.sum](go.sum)) and MIT licensed ([LICENSE](LICENSE)).
+
+## Install
+
+With Go 1.25 or later:
+
+```sh
+git clone <this repository>
+cd tigprint
+go install ./cmd/tigprint
+```
+
+## Quick start
+
+In a project whose main document is `README.md`:
+
+```sh
+tigprint init              # start .tig here
+tigprint chain             # every text block of the chain and its status
+tigprint check             # is the chain closed? (exit status 1 when not)
+tigprint check -run-all    # have tig run every acceptance section itself
+```
+
+A section titled `Acceptance` lists the commands that accept the part of the document it sits in:
+
+````markdown
+## Turning
+
+How a layer of the cube turns. Code: [turn.js](src/turn.js).
+
+### Acceptance
+
+- `npm test -- turn`
+````
+
+Then give agents the project over MCP. For Claude Code:
+
+```sh
+claude mcp add tig -- tigprint mcp
+```
+
+or in any MCP client's configuration:
+
+```json
+{ "mcpServers": { "tig": { "command": "tigprint", "args": ["mcp"] } } }
+```
+
+`tigprint mcp` serves the project it is started in (or `-C dir`). Add `-run` to let agents have tig run acceptance commands.
+
+## How it works
+
+tig has three parts, each with its own document.
+
+### Footprint
+
+Snapshots of the project as content-addressed trees, and the *works* done on it: one work per construction (the main record, like a commit), made of *steps* (the details: every edit with exactly the files it changed, every command, check and decision). See [the footprint](docs/footprint.md).
+
+### Chain
+
+The documents split into text blocks, each named by its content hash; how the blocks change from snapshot to snapshot; and the chain from the main document through detail documents to the files built for them. tig checks whether the chain is *closed*: whether every piece of design is covered by an acceptance. See [the chain](docs/chain.md).
+
+### MCP
+
+`tigprint mcp` serves the chain and the footprint to agents: read and follow the design, see how it was built, check it, and record new work. See [the MCP server](docs/mcp.md).
+
+## Commands
+
+`tigprint` alone lists every command and its flags. The code is in [cmd/tigprint](cmd/tigprint/).
+
+| Command | What it does |
+|---|---|
+| `init` | start a tig in this folder (`-root` the main document, `-strict` to count only checks tig runs) |
+| `snap`, `log`, `diff`, `restore` | snapshots: take one, list them, compare, put files back |
+| `blocks <file.md>` | a document's text blocks and their hashes |
+| `chain` | every block of the chain and its status |
+| `show <block>` | one block: its text, status, details, what was built for it and its works |
+| `search <words>` | blocks, works, steps and files containing every word |
+| `check` | the closure report; `-run <block>` or `-run-all` to run acceptance first; `-json` |
+| `trail <block or file>` | the works done for it; `-steps` for each step and the files it changed |
+| `work start`, `work step`, `work finish` | leave a footprint by hand |
+| `mcp` | serve this tig over MCP on stdin and stdout |
+
+A block is named by its content hash; any unique prefix of 8 or more characters works.
+
+## Format
+
+The `.tig` folder holds plain text objects and records, versioned, so other tools can read and write it too. See [the format](docs/format.md).
+
+## Acceptance
+
+- `go vet ./...`
+- `go test ./...`

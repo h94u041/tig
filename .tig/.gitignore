@@ -1,0 +1,6 @@
+# Local state, not part of the history.
+cache/
+lock
+work.lock
+WORK
+.tmp-*

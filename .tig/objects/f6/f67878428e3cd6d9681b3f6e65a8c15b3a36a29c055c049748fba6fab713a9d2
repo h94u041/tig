@@ -1,0 +1,9 @@
+tig-step 1
+kind check
+basis 60e2dd73208ec0803bcd99e812cdcbb6b31e868683ee3816a73733adaaf9c34c
+command go test -run "Objects|OldTrees" ./tig/
+exit 0
+output 4df9e04974de78e83972295c6e67089d3a7df7b8dfa5eccf9229630a58706d95
+runner tig
+actor claude-code
+at 2026-10-27T16:44:08.331029Z

@@ -1,0 +1,9 @@
+tig-step 1
+kind check
+basis 54873b476ef8e44d0761e069975a4e908b1063c5ce8dee715d3629c05ce4133f
+command go test ./mcpserver/
+exit 0
+output c83423692adea9955a32b349ebf50f8146e9a7338ba4bc62fe4050d7d2ab62a1
+runner tig
+actor claude-code
+at 2026-10-27T16:36:19.1658119Z

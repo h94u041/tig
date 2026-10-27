@@ -1,0 +1,263 @@
+package tig_test
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/Justyr/tig"
+)
+
+const readme = `# Cube game
+
+A cube you can turn in the browser.
+
+## Turning
+
+How layers turn: see [turning](docs/turn.md).
+
+## Scramble
+
+Random moves from [the code](src/scramble.js).
+
+### Acceptance
+
+- ` + "`echo scramble-ok`" + `
+
+## Acceptance
+
+- ` + "`echo game-ok`" + `
+`
+
+const turn = `# Turning
+
+Turn one layer.
+
+## 驗收
+
+- ` + "`echo turn-ok`" + `
+`
+
+func cubeProject(t *testing.T) (*tig.Repo, string) {
+	root := t.TempDir()
+	write(t, root, "README.md", readme)
+	write(t, root, "docs/turn.md", turn)
+	write(t, root, "docs/orphan.md", "# Nobody links here\n")
+	write(t, root, "src/scramble.js", "scramble()\n")
+	write(t, root, "src/turn.js", "turn()\n")
+	return open(t, root), root
+}
+
+func find(t *testing.T, c *tig.Chain, path, title string) *tig.Block {
+	t.Helper()
+	for _, h := range c.Order {
+		if b := c.Blocks[h]; b.Path == path && b.Title == title {
+			return b
+		}
+	}
+	t.Fatalf("no block %q in %s", title, path)
+	return nil
+}
+
+func messages(fs []tig.Finding) string {
+	var out []string
+	for _, f := range fs {
+		out = append(out, f.Path+": "+f.Message)
+	}
+	return strings.Join(out, "\n")
+}
+
+func TestChainClosure(t *testing.T) {
+	ctx := context.Background()
+	r, root := cubeProject(t)
+
+	a, err := r.Analyze(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, rep := a.Chain, a.Report
+	if strings.Join(c.Docs, ",") != "README.md,docs/turn.md" {
+		t.Fatalf("docs: %v", c.Docs)
+	}
+	if len(rep.Broken) != 1 || rep.Broken[0].Path != "docs/orphan.md" {
+		t.Fatalf("broken: %s", messages(rep.Broken))
+	}
+	if len(rep.Open) != 0 {
+		t.Fatalf("open: %s", messages(rep.Open))
+	}
+	if strings.Join(rep.Undesigned, ",") != "src/turn.js" {
+		t.Fatalf("undesigned: %v", rep.Undesigned)
+	}
+	turning := find(t, c, "README.md", "Turning")
+	scramble := find(t, c, "README.md", "Scramble")
+	if a.Status[scramble.Hash] != tig.StatusDirection || a.Status[turning.Hash] != tig.StatusDirection || rep.Closed {
+		t.Fatalf("before any check everything designed is a direction: %v", a.Status)
+	}
+
+	// An agent builds turn.js for the turning document and reports its checks.
+	turnBlock := find(t, c, "docs/turn.md", "Turning")
+	r.StartWork(ctx, []string{turnBlock.Hash}, "build turning", "agent")
+	write(t, root, "src/turn.js", "turn(layer)\n")
+	r.RecordStep(ctx, tig.StepInput{Kind: tig.StepEdit})
+	zero := 0
+	for _, acc := range rep.Acceptance {
+		for _, cmd := range acc.Commands {
+			r.RecordStep(ctx, tig.StepInput{Kind: tig.StepCheck, Basis: []string{acc.Block}, Command: cmd.Command, Exit: &zero})
+		}
+	}
+	if _, err := r.FinishWork(ctx, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(filepath.Join(root, "docs/orphan.md"))
+
+	a, _ = r.Analyze(ctx, "")
+	rep = a.Report
+	// Cube game, Turning and Scramble in the main document, Turning in the
+	// detail document.
+	if !rep.Closed || rep.Guidelines != 4 || rep.Directions != 0 {
+		t.Fatalf("closed %v guidelines %d directions %d\nbroken %s\nopen %s\nstale %s\nundesigned %v",
+			rep.Closed, rep.Guidelines, rep.Directions, messages(rep.Broken), messages(rep.Open), messages(rep.Stale), rep.Undesigned)
+	}
+	if built := a.Built[turnBlock.Hash]; len(built) != 1 || built[0] != "src/turn.js" {
+		t.Fatalf("built: %v", a.Built)
+	}
+	if trail := a.Trail(turning.Hash); len(trail) != 1 || trail[0].Intent != "build turning" {
+		t.Fatal("the main document's Turning section sees the work done for its detail document")
+	}
+	if len(a.FileTrail(ctx, "src/turn.js")) != 1 || len(a.FileTrail(ctx, "src/scramble.js")) != 0 {
+		t.Fatal("a file's trail is the works that changed it")
+	}
+
+	// Strictly, only the checks tig ran itself count.
+	r.SetConfig(tig.Config{Root: "README.md", Verify: tig.VerifyStrict})
+	a, _ = r.Analyze(ctx, "")
+	if a.Report.Guidelines != 0 || a.Report.Directions != 4 {
+		t.Fatalf("strict: %+v", a.Report)
+	}
+	for _, acc := range a.Report.Acceptance {
+		steps, err := r.RunAcceptance(ctx, acc.Block, "ci", 0)
+		if err != nil || len(steps) != 1 || !steps[0].Passed() || steps[0].Runner != tig.RunnerTig {
+			t.Fatalf("run %s: %+v %v", acc.Accepts, steps, err)
+		}
+	}
+	a, _ = r.Analyze(ctx, "")
+	if !a.Report.Closed || a.Report.Guidelines != 4 {
+		t.Fatalf("after tig ran the acceptance: %+v", a.Report)
+	}
+	hits := a.Search("turn LAYER", []string{"src/turn.js"})
+	if len(hits) != 2 || hits[1].Ref != turnBlock.Hash {
+		t.Fatalf("search: %+v", hits)
+	}
+	if hits := a.Search("turn.js", []string{"src/turn.js"}); len(hits) != 1 || hits[0].Kind != "file" {
+		t.Fatalf("search files: %+v", hits)
+	}
+}
+
+func TestStaleLinks(t *testing.T) {
+	ctx := context.Background()
+	r, root := cubeProject(t)
+	os.Remove(filepath.Join(root, "docs/orphan.md"))
+	c, _ := r.Chain(ctx, "")
+	turnBlock := find(t, c, "docs/turn.md", "Turning")
+	r.StartWork(ctx, []string{turnBlock.Hash}, "build turning", "agent")
+	write(t, root, "src/turn.js", "turn(layer)\n")
+	r.RecordStep(ctx, tig.StepInput{Kind: tig.StepEdit})
+	r.FinishWork(ctx, "", nil)
+
+	// The design changes; the code does not follow.
+	write(t, root, "docs/turn.md", strings.Replace(turn, "Turn one layer.", "Turn one layer, or the whole cube.", 1))
+	a, _ := r.Analyze(ctx, "")
+	if len(a.Report.Stale) != 1 || !strings.Contains(a.Report.Stale[0].Message, "design changed") || a.Report.Stale[0].Path != "src/turn.js" {
+		t.Fatalf("stale after the design changed: %s", messages(a.Report.Stale))
+	}
+	// Building it again for the new design follows it.
+	newBlock := find(t, a.Chain, "docs/turn.md", "Turning")
+	r.StartWork(ctx, []string{newBlock.Hash}, "turn the whole cube", "agent")
+	write(t, root, "src/turn.js", "turn(layer)\nturnCube()\n")
+	r.RecordStep(ctx, tig.StepInput{Kind: tig.StepEdit})
+	r.FinishWork(ctx, "", nil)
+	if a, _ = r.Analyze(ctx, ""); len(a.Report.Stale) != 0 {
+		t.Fatalf("followed: %s", messages(a.Report.Stale))
+	}
+	if len(a.Before(newBlock.Hash)) != 1 {
+		t.Fatal("the new block knows what it was")
+	}
+
+	// A work that changes its own design, then the code: the code follows
+	// the design the work leaves, while it is in progress and after.
+	r.StartWork(ctx, []string{newBlock.Hash}, "turn faces too", "agent")
+	write(t, root, "docs/turn.md", strings.Replace(turn, "Turn one layer.", "Turn one layer, the whole cube, or a face.", 1))
+	r.RecordStep(ctx, tig.StepInput{Kind: tig.StepEdit})
+	write(t, root, "src/turn.js", "turn(layer)\nturnCube()\nturnFace()\n")
+	r.RecordStep(ctx, tig.StepInput{Kind: tig.StepEdit})
+	if a, _ = r.Analyze(ctx, ""); len(a.Report.Stale) != 0 {
+		t.Fatalf("in progress: %s", messages(a.Report.Stale))
+	}
+	r.FinishWork(ctx, "", nil)
+	if a, _ = r.Analyze(ctx, ""); len(a.Report.Stale) != 0 {
+		t.Fatalf("finished: %s", messages(a.Report.Stale))
+	}
+
+	// The code changes outside the footprint.
+	write(t, root, "src/turn.js", "hand edit\n")
+	a, _ = r.Analyze(ctx, "")
+	if len(a.Report.Stale) != 1 || !strings.Contains(a.Report.Stale[0].Message, "outside the footprint") {
+		t.Fatalf("stale after a hand edit: %s", messages(a.Report.Stale))
+	}
+}
+
+func TestCoverRules(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	// The top section hands on to a detail document, but a section under it
+	// with its own acceptance is accepted by that; a section without one is
+	// handed on with its parent. An intro is covered by its sections.
+	write(t, root, "README.md", "# Shop\n\nA shop. Prices: [pricing](docs/pricing.md).\n\n## Cart\n\nAdds items.\n\n### Acceptance\n\n- `echo cart`\n\n## Notes\n\nPlain.\n")
+	write(t, root, "docs/pricing.md", "# Pricing\n\nCents.\n\n## Greeting\n\nHi.\n\n### Acceptance\n\n- `echo hi`\n\n## Farewell\n\nBye.\n")
+	r := open(t, root)
+	a, _ := r.Analyze(ctx, "")
+	c := a.Chain
+	cart, notes, shop := find(t, c, "README.md", "Cart"), find(t, c, "README.md", "Notes"), find(t, c, "README.md", "Shop")
+	pricingTop, farewell := find(t, c, "docs/pricing.md", "Pricing"), find(t, c, "docs/pricing.md", "Farewell")
+	if a.Cover[cart.Hash] == "" || a.Status[cart.Hash] != tig.StatusDirection {
+		t.Fatalf("a section with its own acceptance: %q %q", a.Cover[cart.Hash], a.Status[cart.Hash])
+	}
+	if a.Status[notes.Hash] != tig.StatusOpen || a.Status[shop.Hash] != tig.StatusOpen || a.Status[pricingTop.Hash] != tig.StatusOpen {
+		t.Fatalf("Farewell is open, so is what reaches it: %v", a.Status)
+	}
+	if len(a.Report.Open) != 1 || a.Report.Open[0].Block != farewell.Hash {
+		t.Fatalf("only the uncovered section itself is reported: %s", messages(a.Report.Open))
+	}
+
+	write(t, root, "docs/pricing.md", "# Pricing\n\nCents.\n\n## Greeting\n\nHi.\n\n### Acceptance\n\n- `echo hi`\n")
+	a, _ = r.Analyze(ctx, "")
+	if !a.Report.Closed || a.Status[find(t, a.Chain, "docs/pricing.md", "Pricing").Hash] != tig.StatusDirection {
+		t.Fatalf("an intro covered by its sections: %+v %v", a.Report, a.Status)
+	}
+}
+
+func TestOpenAndBroken(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	write(t, root, "README.md", "# Game\n\nNo acceptance here. See [missing](docs/missing.md) and [detail](docs/detail.md).\n\n## Rules\n\nSome rules.\n")
+	write(t, root, "docs/detail.md", "# Detail\n\nDesign without acceptance.\n")
+	write(t, root, "docs/empty.md", "")
+	write(t, root, "notes/draft.md", "# Draft\n")
+	r := open(t, root)
+	r.SetConfig(tig.Config{Root: "README.md", Outside: []string{"notes"}})
+	a, _ := r.Analyze(ctx, "")
+	rep := a.Report
+	if len(rep.Broken) != 2 || !strings.Contains(messages(rep.Broken), "docs/missing.md, which does not exist") || !strings.Contains(messages(rep.Broken), "docs/empty.md") {
+		t.Fatalf("broken: %s", messages(rep.Broken))
+	}
+	// The Game section hands on to docs/detail.md, so its Rules are handed on
+	// too; the detail document has design without acceptance.
+	if !strings.Contains(messages(rep.Open), "docs/detail.md: no acceptance covers this block") || !strings.Contains(messages(rep.Open), "the detail document has no acceptance") {
+		t.Fatalf("open: %s", messages(rep.Open))
+	}
+	if rep.Closed {
+		t.Fatal("not closed")
+	}
+}

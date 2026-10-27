@@ -1,0 +1,8 @@
+tig-step 1
+kind edit
+basis 597dd74c59ca80471ee86751f5f834ca662796638109eb36b6783981fcf57ead
+before 7208ea66eae78bafc709254134d30dabe84266fdaf848896cdc4aeb2dc97dedb
+after baaf74ecfb461be593e1b1e74b4b7cd3e908deacf13490518ff837c9c7e29a0f
+note fix: a work that changes its own design builds for the design it leaves (found by this work)
+actor claude-code
+at 2026-10-27T16:43:43.7999837Z

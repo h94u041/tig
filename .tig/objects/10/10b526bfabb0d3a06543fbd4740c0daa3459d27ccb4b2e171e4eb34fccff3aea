@@ -1,0 +1,9 @@
+tig-step 1
+kind check
+basis 47c48e710e20b45aed5141bd1aaded043017a19e223030ebec5e10df0419ce2d
+command go test -run "Snapshot|Objects|Restore|Trees|Records|Executable|Work" ./tig/
+exit 0
+output 238032791df9415ae313e32ae4ce9f4ac1d6d0f665f0ecaf7d3131b96ccadf94
+runner tig
+actor claude-code
+at 2026-10-27T16:41:55.3608406Z

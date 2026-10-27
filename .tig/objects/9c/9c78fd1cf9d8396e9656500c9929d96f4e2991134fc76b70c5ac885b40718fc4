@@ -1,0 +1,8 @@
+tig-step 1
+kind edit
+basis d219636788a2a2289bb5a3d7a396743fbbb51f69e044b2a2edf23d7922bef7f9
+before d7d77e7c50020efc16da84b3253d136a19882a58dd242baef9041575853ca381
+after 4fd88d40cc8dc6b3d7c537eeeb2cc93da75cc0d26b1d8bb276bd94d771f1efd5
+note init writes .tig/.gitattributes (* -text); this repository fixes LF in Git
+actor claude-code
+at 2026-10-27T16:55:09.3348239Z

@@ -1,0 +1,247 @@
+package tig_test
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"testing"
+
+	"tig"
+)
+
+func write(t *testing.T, dir, rel, text string) {
+	t.Helper()
+	full := filepath.Join(dir, filepath.FromSlash(rel))
+	os.MkdirAll(filepath.Dir(full), 0o755)
+	if err := os.WriteFile(full, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func open(t *testing.T, root string) *tig.Repo {
+	t.Helper()
+	r := tig.Open(root)
+	if err := r.Init(tig.Config{Root: "README.md"}); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestSnapshotChainDiffAndRestore(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	write(t, root, "src/a.go", "package a\n")
+	write(t, root, "docs/readme.md", "# hi\n")
+	write(t, root, "node_modules/x.js", "skipped")
+	r := open(t, root)
+
+	first, changed, err := r.Take(ctx, tig.ReasonOpen, "someone")
+	if err != nil || !changed || first.Parent() != "" || first.Reason != tig.ReasonOpen {
+		t.Fatalf("first: %+v %v %v", first, changed, err)
+	}
+	files, _ := tig.ReadTree(ctx, r.Objects, first.Tree)
+	if len(files) != 2 {
+		t.Fatalf("skipped folders and .tig itself are not in the tree: %v", files)
+	}
+	if again, changed, _ := r.Take(ctx, tig.ReasonScan, ""); changed || again.ID != first.ID {
+		t.Fatal("an unchanged project adds no record")
+	}
+
+	write(t, root, "src/a.go", "package a\n\nfunc A() {}\n")
+	write(t, root, "src/b.go", "package a\n")
+	os.Remove(filepath.Join(root, "docs/readme.md"))
+	cs, _ := r.Changed(ctx, first.Tree)
+	if len(cs) != 3 || cs[0] != (tig.Change{Path: "docs/readme.md", Op: "delete"}) || cs[1].Op != "modify" || cs[2].Op != "add" {
+		t.Fatalf("changes: %+v", cs)
+	}
+	second, _, _ := r.Take(ctx, tig.ReasonAfter, "agent")
+	log, err := r.Log(ctx, 0)
+	if err != nil || len(log) != 2 || log[0].ID != second.ID || log[1].ID != first.ID || second.Parent() != first.ID {
+		t.Fatalf("log: %+v %v", log, err)
+	}
+	loaded, _ := tig.Load(ctx, r.Objects, second.ID)
+	if loaded.Tree != second.Tree || loaded.Actor != "agent" || loaded.At.IsZero() {
+		t.Fatalf("load: %+v", loaded)
+	}
+	if d, _ := tig.DiffTrees(ctx, r.Objects, first.Tree, second.Tree); fmt.Sprint(d) != fmt.Sprint(cs) {
+		t.Fatalf("tree diff %v, file diff %v", d, cs)
+	}
+
+	if err := r.Restore(ctx, first.Tree, tig.Paths(cs)); err != nil {
+		t.Fatal(err)
+	}
+	if cs, _ := r.Changed(ctx, first.Tree); len(cs) != 0 {
+		t.Fatalf("after restore: %+v", cs)
+	}
+	if data, ok := r.Content(ctx, second.Tree, "src/b.go"); !ok || string(data) != "package a\n" {
+		t.Fatal("content of a snapshot")
+	}
+	if _, ok := r.Content(ctx, second.Tree, "src"); ok {
+		t.Fatal("a folder has no content")
+	}
+}
+
+func TestObjectsAreCheckedAndStoredPlain(t *testing.T) {
+	ctx := context.Background()
+	d := tig.Dir(t.TempDir())
+	h, err := d.PutObject(ctx, []byte("hello"))
+	if err != nil || h != tig.HashOf([]byte("hello")) {
+		t.Fatal(h, err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(string(d), h[:2], h))
+	if string(raw) != "hello" {
+		t.Fatal("objects are stored as they are, so Git can compress them")
+	}
+	for _, bad := range []string{"", "../../etc/passwd", strings.Repeat("A", 64), strings.Repeat("a", 63)} {
+		if _, err := d.GetObject(ctx, bad); err == nil {
+			t.Errorf("hash %q accepted", bad)
+		}
+	}
+	os.WriteFile(filepath.Join(string(d), h[:2], h), []byte("tampered"), 0o644)
+	if _, err := d.GetObject(ctx, h); err == nil || !strings.Contains(err.Error(), "corrupt") {
+		t.Fatalf("a tampered object is refused: %v", err)
+	}
+	file := filepath.Join(t.TempDir(), "big")
+	os.WriteFile(file, []byte(strings.Repeat("x", 100000)), 0o644)
+	fh, n, err := d.PutFile(ctx, file)
+	if err != nil || n != 100000 || fh != tig.HashOf([]byte(strings.Repeat("x", 100000))) {
+		t.Fatal(fh, n, err)
+	}
+}
+
+// A .tig can come from someone else's repository: its trees must not write
+// outside the project, into .git or .tig, or through a symbolic link.
+func TestRestoreRefusesUnsafePaths(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	r := open(t, root)
+	for _, rel := range []string{"../outside.txt", ".git/hooks/pre-commit", ".tig/HEAD", "a/../../b", "/etc/x", `a\b`, ".GIT/config"} {
+		if err := r.Restore(ctx, "", []string{rel}); err == nil {
+			t.Errorf("restore of %q was allowed", rel)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		for _, rel := range []string{".. /x", "x/.../y", "c:x", ".git./config"} {
+			if err := r.Restore(ctx, "", []string{rel}); err == nil {
+				t.Errorf("restore of %q was allowed on Windows", rel)
+			}
+		}
+	}
+	// Crafted trees are refused when read.
+	for _, line := range []string{"f " + strings.Repeat("a", 64) + " 1 ..", "d " + strings.Repeat("a", 64) + " a/b", "f ../../x 1 y", "q " + strings.Repeat("a", 64) + " 1 y"} {
+		h, _ := r.Objects.PutObject(ctx, []byte(tig.TreeHeader+line+"\n"))
+		if _, err := tig.ReadTree(ctx, r.Objects, h); err == nil {
+			t.Errorf("tree line %q accepted", line)
+		}
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Skip("cannot make a symbolic link here:", err)
+	}
+	content, _ := r.Objects.PutObject(ctx, []byte("evil"))
+	sub, _ := tig.WriteTree(ctx, r.Objects, map[string]tig.Entry{"x.txt": {Hash: content, Size: 4}})
+	tree, _ := r.Objects.PutObject(ctx, []byte(tig.TreeHeader+"d "+sub+" link\n"))
+	if err := r.Restore(ctx, tree, []string{"link/x.txt"}); err == nil {
+		t.Fatal("restore wrote through a symbolic link")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "x.txt")); err == nil {
+		t.Fatal("a file landed outside the project")
+	}
+}
+
+func TestOldTreesAndExtraFieldsAreRead(t *testing.T) {
+	ctx := context.Background()
+	r := open(t, t.TempDir())
+	content, _ := r.Objects.PutObject(ctx, []byte("a"))
+	old, _ := r.Objects.PutObject(ctx, []byte("tealprint-tree 1\nf "+content+" 1 a.txt\n"))
+	files, err := tig.ReadTree(ctx, r.Objects, old)
+	if err != nil || files["a.txt"].Hash != content {
+		t.Fatalf("an older tree is read: %v %v", files, err)
+	}
+	snap, _ := r.Objects.PutObject(ctx, []byte("tig-snapshot 1\ntree "+old+"\nat 2026-10-01T00:00:00Z\nreason scan\nx-signature abc\nlater-field ignored\n"))
+	s, err := tig.Load(ctx, r.Objects, snap)
+	if err != nil || s.Extra["x-signature"][0] != "abc" || s.Reason != "scan" {
+		t.Fatalf("a record with fields from a later feature: %+v %v", s, err)
+	}
+}
+
+func TestLookupAndDiffTrees(t *testing.T) {
+	ctx := context.Background()
+	r := open(t, t.TempDir())
+	put := func(s string) tig.Entry {
+		h, _ := r.Objects.PutObject(ctx, []byte(s))
+		return tig.Entry{Hash: h, Size: int64(len(s))}
+	}
+	a := map[string]tig.Entry{"a/b/c.txt": put("1"), "a/d.txt": put("2"), "e.txt": put("3"), "same/x": put("4"), "f": put("5")}
+	b := map[string]tig.Entry{"a/b/c.txt": put("1!"), "e.txt": put("3"), "same/x": put("4"), "f/g": put("6"), "new/y": put("7")}
+	ta, _ := tig.WriteTree(ctx, r.Objects, a)
+	tb, _ := tig.WriteTree(ctx, r.Objects, b)
+	got, err := tig.DiffTrees(ctx, r.Objects, ta, tb)
+	if err != nil || fmt.Sprint(got) != fmt.Sprint(tig.Diff(a, b)) {
+		t.Fatalf("DiffTrees %v\nDiff      %v\n%v", got, tig.Diff(a, b), err)
+	}
+	if e, ok, _ := tig.Lookup(ctx, r.Objects, ta, "a/b/c.txt"); !ok || e != a["a/b/c.txt"] {
+		t.Fatal("lookup")
+	}
+	if _, ok, _ := tig.Lookup(ctx, r.Objects, ta, "a/b"); ok {
+		t.Fatal("a folder is not a file")
+	}
+	if all, _ := tig.DiffTrees(ctx, r.Objects, "", ta); len(all) != len(a) {
+		t.Fatal("against an empty tree everything is added")
+	}
+}
+
+func TestRecordsDoNotGetLostWhenWrittenTogether(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	open(t, root)
+	var wg sync.WaitGroup
+	trees := make([]string, 20)
+	for i := range trees {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			r := tig.Open(root) // as if each were its own process
+			h, _ := tig.WriteTree(ctx, r.Objects, map[string]tig.Entry{fmt.Sprintf("f%d", i): {Hash: tig.HashOf(nil)}})
+			if _, _, err := r.Record(ctx, h, tig.ReasonScan, ""); err != nil {
+				t.Error(err)
+			}
+			trees[i] = h
+		}(i)
+	}
+	wg.Wait()
+	log, _ := tig.Open(root).Log(ctx, 0)
+	var got []string
+	for _, s := range log {
+		got = append(got, s.Tree)
+	}
+	sort.Strings(got)
+	sort.Strings(trees)
+	if fmt.Sprint(got) != fmt.Sprint(trees) {
+		t.Fatalf("%d of %d records kept", len(got), len(trees))
+	}
+}
+
+func TestExecutableBitIsKept(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows files have no executable bit")
+	}
+	ctx := context.Background()
+	root := t.TempDir()
+	write(t, root, "run.sh", "#!/bin/sh\n")
+	os.Chmod(filepath.Join(root, "run.sh"), 0o755)
+	r := open(t, root)
+	s, _, _ := r.Take(ctx, tig.ReasonScan, "")
+	os.Remove(filepath.Join(root, "run.sh"))
+	if err := r.Restore(ctx, s.Tree, []string{"run.sh"}); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(filepath.Join(root, "run.sh")); fi.Mode()&0o111 == 0 {
+		t.Fatal("the script lost its executable bit")
+	}
+}

@@ -1,0 +1,408 @@
+// Package tig keeps a project's footprint: the files as content-addressed
+// objects and trees, a chain of snapshots, the construction works and their
+// steps, and how the project's Markdown documents change and link to what was
+// built. Its data lives in the project's .tig folder and goes into Git with
+// the project. The format is fixed and versioned (see docs/format.md).
+package tig
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+	"time"
+)
+
+// Repo is one project's tig.
+type Repo struct {
+	Root    string   // the project folder
+	Skip    []string // folders a project without Git leaves out
+	Objects Objects
+	// Dir holds the heads, the config, the local cache and the lock (.tig).
+	// Empty: nothing persists but the objects, and there are no heads.
+	Dir string
+}
+
+// Open is the tig in root/.tig. It need not exist yet; Init creates it.
+func Open(root string) *Repo {
+	d := filepath.Join(root, ".tig")
+	return &Repo{Root: root, Objects: Dir(filepath.Join(d, "objects")), Dir: d}
+}
+
+// Exists reports whether the project has a .tig.
+func (r *Repo) Exists() bool {
+	if r.Dir == "" {
+		return false
+	}
+	fi, err := os.Stat(r.Dir)
+	return err == nil && fi.IsDir()
+}
+
+// The local state in .tig that is not part of the history.
+const gitignore = `# Local state, not part of the history.
+cache/
+lock
+work.lock
+WORK
+.tmp-*
+`
+
+// Init creates .tig with a config and a .gitignore. An existing config is
+// kept.
+func (r *Repo) Init(cfg Config) error {
+	if r.Dir == "" {
+		return errors.New("tig: no .tig folder to create")
+	}
+	if err := os.MkdirAll(filepath.Join(r.Dir, "objects"), 0o755); err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(r.Dir, ".gitignore")); errors.Is(err, fs.ErrNotExist) {
+		if err := writeAtomic(filepath.Join(r.Dir, ".gitignore"), []byte(gitignore), 0o644); err != nil {
+			return err
+		}
+	}
+	if _, err := os.Stat(filepath.Join(r.Dir, "config")); errors.Is(err, fs.ErrNotExist) {
+		return r.SetConfig(cfg)
+	}
+	return nil
+}
+
+func (r *Repo) cacheDir() string {
+	if r.Dir == "" {
+		return ""
+	}
+	return filepath.Join(r.Dir, "cache")
+}
+
+// Config is .tig/config.
+type Config struct {
+	Root    string   `json:"root"`              // the main document
+	Verify  string   `json:"verify"`            // loose (agents' reported checks count) or strict (only tig's own runs count)
+	Outside []string `json:"outside,omitempty"` // path prefixes that are not part of the chain
+}
+
+// Verification modes.
+const (
+	VerifyLoose  = "loose"
+	VerifyStrict = "strict"
+)
+
+const configHeader = "tig-config 1"
+
+// Config reads .tig/config; a project without one gets the defaults.
+func (r *Repo) Config() (Config, error) {
+	c := Config{Root: "README.md", Verify: VerifyLoose}
+	if r.Dir == "" {
+		return c, nil
+	}
+	raw, err := os.ReadFile(filepath.Join(r.Dir, "config"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return c, nil
+	}
+	if err != nil {
+		return c, err
+	}
+	rec, err := parseRecord(raw, configHeader)
+	if err != nil {
+		return c, err
+	}
+	if v := rec.get("root"); v != "" {
+		c.Root = v
+	}
+	if v := rec.get("verify"); v == VerifyStrict {
+		c.Verify = v
+	}
+	c.Outside = rec.all("outside")
+	return c, nil
+}
+
+// SetConfig writes .tig/config.
+func (r *Repo) SetConfig(c Config) error {
+	rec := newRecord(configHeader)
+	rec.set("root", c.Root)
+	if c.Verify != VerifyStrict {
+		c.Verify = VerifyLoose
+	}
+	rec.set("verify", c.Verify)
+	rec.setAll("outside", c.Outside)
+	if err := os.MkdirAll(r.Dir, 0o755); err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(r.Dir, "config"), rec.bytes(), 0o644)
+}
+
+// Heads: the latest snapshot, the latest work, the latest proposed link.
+const (
+	headSnapshots = "HEAD"
+	headWorks     = "WORKS"
+	headLinks     = "LINKS"
+)
+
+func (r *Repo) readHead(name string) (string, error) {
+	if r.Dir == "" {
+		return "", nil
+	}
+	raw, err := os.ReadFile(filepath.Join(r.Dir, name))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(string(raw))
+	if id != "" && !ValidHash(id) {
+		return "", fmt.Errorf("tig: .tig/%s does not hold a hash", name)
+	}
+	return id, nil
+}
+
+func (r *Repo) writeHead(name, id string) error {
+	if r.Dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(r.Dir, 0o755); err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(r.Dir, name), []byte(id+"\n"), 0o644)
+}
+
+// Scan reads the project's files into the object store, reading only the
+// files whose size, modification time or executable bit changed since the
+// last scan.
+func (r *Repo) Scan(ctx context.Context) (map[string]Entry, error) {
+	list, err := Files(ctx, r.Root, r.Skip)
+	if err != nil {
+		return nil, err
+	}
+	cache := openStatCache(r.cacheDir())
+	defer cache.close()
+	has, _ := r.Objects.(interface{ Has(string) bool })
+	putter, _ := r.Objects.(FilePutter)
+	now := time.Now()
+	out := make(map[string]Entry, len(list))
+	for _, rel := range list {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		full := filepath.Join(r.Root, filepath.FromSlash(rel))
+		st, err := os.Lstat(full)
+		if err != nil || !st.Mode().IsRegular() {
+			continue // gone since it was listed
+		}
+		mod, exec := st.ModTime().UnixNano(), executable(st)
+		// A cached hash whose object is gone (another Git branch of .tig) is
+		// read again.
+		if c, ok := cache.get(rel); ok && c.Size == st.Size() && c.Mod == mod && c.Exec == exec && (has == nil || has.Has(c.Hash)) {
+			out[rel] = Entry{Hash: c.Hash, Size: c.Size, Exec: exec}
+			continue
+		}
+		var h string
+		var n int64
+		if putter != nil {
+			h, n, err = putter.PutFile(ctx, full)
+		} else {
+			var data []byte
+			if data, err = os.ReadFile(full); err == nil {
+				n = int64(len(data))
+				h, err = r.Objects.PutObject(ctx, data)
+			}
+		}
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out[rel] = Entry{Hash: h, Size: n, Exec: exec}
+		// Like Git's racy check: a file changed within the clock's resolution
+		// could change again without its time moving, so it is read next time.
+		if now.Sub(st.ModTime()) > 2*time.Second && n == st.Size() {
+			cache.put(rel, statEntry{Size: n, Mod: mod, Exec: exec, Hash: h})
+		} else {
+			cache.drop(rel)
+		}
+	}
+	cache.keepOnly(out)
+	return out, nil
+}
+
+func executable(fi fs.FileInfo) bool {
+	return runtime.GOOS != "windows" && fi.Mode()&0o111 != 0
+}
+
+// Changed lists the files that differ from a tree now.
+func (r *Repo) Changed(ctx context.Context, tree string) ([]Change, error) {
+	before, err := ReadTree(ctx, r.Objects, tree)
+	if err != nil {
+		return nil, err
+	}
+	now, err := r.Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return Diff(before, now), nil
+}
+
+// Content is a file's content in a tree, and whether it existed.
+func (r *Repo) Content(ctx context.Context, tree, rel string) ([]byte, bool) {
+	e, ok, err := Lookup(ctx, r.Objects, tree, rel)
+	if err != nil || !ok {
+		return nil, false
+	}
+	data, err := r.Objects.GetObject(ctx, e.Hash)
+	return data, err == nil
+}
+
+// Files larger than this are not read whole.
+const maxRead = 64 << 20
+
+// ReadFile reads a project file as it is now. Only the project's own files
+// are read (those Files lists: nothing Git ignores, nothing in .git or .tig),
+// never through a symbolic link.
+func (r *Repo) ReadFile(ctx context.Context, rel string) ([]byte, error) {
+	full, err := r.safePath(rel)
+	if err != nil {
+		return nil, err
+	}
+	files, err := Files(ctx, r.Root, r.Skip)
+	if err != nil {
+		return nil, err
+	}
+	if !slices.Contains(files, rel) {
+		return nil, fs.ErrNotExist
+	}
+	fi, err := os.Lstat(full)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fs.ErrNotExist
+	}
+	if fi.Size() > maxRead {
+		return nil, fmt.Errorf("tig: %s is too large to read (%d bytes)", rel, fi.Size())
+	}
+	return os.ReadFile(full)
+}
+
+// safePath is where rel is in the project. It refuses anything that could
+// land outside the project or inside .git or .tig, because the trees it
+// comes from can be someone else's.
+func (r *Repo) safePath(rel string) (string, error) {
+	bad := func(why string) (string, error) { return "", fmt.Errorf("tig: refusing the path %q: %s", rel, why) }
+	if rel == "" || strings.HasPrefix(rel, "/") || strings.ContainsAny(rel, "\\\r\n\x00") {
+		return bad("not a project path")
+	}
+	parts := strings.Split(rel, "/")
+	for _, p := range parts {
+		if !validName(p) {
+			return bad("not a project path")
+		}
+		name := p
+		if runtime.GOOS == "windows" {
+			// Windows drops trailing dots and spaces (".. " is "..") and reads
+			// "a:b" as a drive or a stream.
+			name = strings.TrimRight(p, ". ")
+			if name == "" || strings.Contains(p, ":") {
+				return bad("not a project path on Windows")
+			}
+		}
+		if low := strings.ToLower(name); low == ".git" || low == ".tig" {
+			return bad("inside " + low)
+		}
+	}
+	full := filepath.Join(r.Root, filepath.FromSlash(rel))
+	if back, err := filepath.Rel(r.Root, full); err != nil || back == ".." || strings.HasPrefix(back, ".."+string(filepath.Separator)) {
+		return bad("outside the project")
+	}
+	// Writing through a symbolic link would land somewhere else.
+	cur := r.Root
+	for _, p := range parts[:len(parts)-1] {
+		cur = filepath.Join(cur, p)
+		fi, err := os.Lstat(cur)
+		if errors.Is(err, fs.ErrNotExist) {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			return bad("it goes through a symbolic link")
+		}
+		if !fi.IsDir() {
+			return bad(filepath.ToSlash(cur) + " is not a folder")
+		}
+	}
+	return full, nil
+}
+
+// Restore puts the given files back to how they were in a tree; a file the
+// tree does not have is removed.
+func (r *Repo) Restore(ctx context.Context, tree string, paths []string) error {
+	for _, rel := range paths {
+		full, err := r.safePath(rel)
+		if err != nil {
+			return err
+		}
+		e, ok, err := Lookup(ctx, r.Objects, tree, rel)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			if err := os.Remove(full); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+			continue
+		}
+		data, err := r.Objects.GetObject(ctx, e.Hash)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return err
+		}
+		perm := fs.FileMode(0o644)
+		if e.Exec {
+			perm = 0o755
+		}
+		if err := writeAtomic(full, data, perm); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// With is a tree with the given files as they are now (gone ones removed);
+// every other file keeps its content in the tree.
+func (r *Repo) With(ctx context.Context, tree string, paths []string) (string, error) {
+	files, err := ReadTree(ctx, r.Objects, tree)
+	if err != nil {
+		return tree, err
+	}
+	for _, rel := range paths {
+		if !listable(rel) {
+			continue
+		}
+		full := filepath.Join(r.Root, filepath.FromSlash(rel))
+		st, err := os.Lstat(full)
+		if err != nil || !st.Mode().IsRegular() {
+			delete(files, rel)
+			continue
+		}
+		data, err := os.ReadFile(full)
+		if err != nil {
+			delete(files, rel)
+			continue
+		}
+		h, err := r.Objects.PutObject(ctx, data)
+		if err != nil {
+			return tree, err
+		}
+		files[rel] = Entry{Hash: h, Size: int64(len(data)), Exec: executable(st)}
+	}
+	return WriteTree(ctx, r.Objects, files)
+}
