@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Justyr/tig"
+	"github.com/h94u041/tig"
 )
 
 func write(t *testing.T, dir, rel, text string) {

@@ -16,7 +16,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/Justyr/tig"
+	"github.com/h94u041/tig"
 )
 
 // Options are how the server behaves.

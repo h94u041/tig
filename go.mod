@@ -1,4 +1,4 @@
-module github.com/Justyr/tig
+module github.com/h94u041/tig
 
 go 1.25.0
 

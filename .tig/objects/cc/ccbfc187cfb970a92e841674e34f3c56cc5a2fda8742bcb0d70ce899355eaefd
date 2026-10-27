@@ -1,0 +1,73 @@
+package tig_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/h94u041/tig"
+)
+
+func TestWorkAndSteps(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	write(t, root, "README.md", "# A\n")
+	r := open(t, root)
+	basis := tig.ParseBlocks("README.md", []byte("# A\n"))[1].Hash
+
+	if _, err := r.RecordStep(ctx, tig.StepInput{Kind: tig.StepNote}); !errors.Is(err, tig.ErrNoWork) {
+		t.Fatal("a step needs a work")
+	}
+	open, err := r.StartWork(ctx, []string{basis}, "build A", "agent-1")
+	if err != nil || open.Before == "" {
+		t.Fatal(open, err)
+	}
+	if _, err := r.StartWork(ctx, nil, "another", ""); !errors.Is(err, tig.ErrWorkOpen) {
+		t.Fatal("one work at a time")
+	}
+	write(t, root, "a.go", "package a\n")
+	edit, err := r.RecordStep(ctx, tig.StepInput{Kind: tig.StepEdit, Note: "add a.go"})
+	if err != nil || edit.Before == "" || edit.After == "" || edit.Before == edit.After || edit.Actor != "agent-1" || edit.Basis[0] != basis {
+		t.Fatalf("edit: %+v %v", edit, err)
+	}
+	code := 1
+	failed, _ := r.RecordStep(ctx, tig.StepInput{Kind: tig.StepCheck, Command: "go test", Exit: &code, Output: "FAIL"})
+	code = 0
+	passed, _ := r.RecordStep(ctx, tig.StepInput{Kind: tig.StepCheck, Command: "go test", Exit: &code, Output: "ok"})
+	decided, _ := r.RecordStep(ctx, tig.StepInput{Kind: tig.StepDecision, Detail: "Q: which language?\nA: Go", Actor: "user"})
+	w, err := r.FinishWork(ctx, "", []string{"user"})
+	if err != nil || w.Result != tig.ResultPassed || len(w.Steps) != 4 || w.After == "" || w.Approvers[0] != "user" {
+		t.Fatalf("work: %+v %v", w, err)
+	}
+	if cur, _ := r.Current(); cur != nil {
+		t.Fatal("finishing clears the work in progress")
+	}
+
+	loaded, err := tig.LoadWork(ctx, r.Objects, w.ID)
+	if err != nil || loaded.Intent != "build A" || loaded.Steps[0] != edit.ID || loaded.Basis[0] != basis {
+		t.Fatalf("load: %+v %v", loaded, err)
+	}
+	s, _ := tig.LoadStep(ctx, r.Objects, failed.ID)
+	if s.Passed() || *s.Exit != 1 {
+		t.Fatal("a failed check")
+	}
+	if out, _ := r.Objects.GetObject(ctx, passed.Output); string(out) != "ok" {
+		t.Fatal("the output is kept")
+	}
+	if d, _ := tig.LoadStep(ctx, r.Objects, decided.ID); d.Actor != "user" || d.Detail == "" {
+		t.Fatal("a decision")
+	}
+	if cs, _ := tig.DiffTrees(ctx, r.Objects, edit.Before, edit.After); len(cs) != 1 || cs[0].Path != "a.go" {
+		t.Fatalf("the edit's own change: %v", cs)
+	}
+
+	r.StartWork(ctx, nil, "second", "")
+	second, _ := r.FinishWork(ctx, "", nil)
+	if second.Result != tig.ResultDone || second.Parent != w.ID {
+		t.Fatalf("second: %+v", second)
+	}
+	works, _ := r.Works(ctx, 0)
+	if len(works) != 2 || works[0].ID != second.ID {
+		t.Fatal("works, newest first")
+	}
+}

@@ -1,0 +1,155 @@
+package tig_test
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/h94u041/tig"
+)
+
+const cube = "Intro text.\n" +
+	"\n" +
+	"# Cube\n" +
+	"\n" +
+	"A Rubik's cube. See [turning](docs/turn.md) and ![shot](img/a.png).\n" +
+	"\n" +
+	"```\n" +
+	"# not a heading\n" +
+	"[not a link](x.md)\n" +
+	"```\n" +
+	"\n" +
+	"## Scramble\n" +
+	"\n" +
+	"Random moves. `[code](no.md)` is not a link.\n" +
+	"\n" +
+	"### 驗收\n" +
+	"\n" +
+	"```sh\n" +
+	"$ go test ./scramble\n" +
+	"# a comment\n" +
+	"go vet ./...\n" +
+	"```\n" +
+	"\n" +
+	"- `npm test` runs the browser tests\n" +
+	"\n" +
+	"## Notes\n" +
+	"\n" +
+	"## Notes\n" +
+	"\n" +
+	"[ref]: docs/ref.md\n"
+
+func TestParseBlocks(t *testing.T) {
+	bs := tig.ParseBlocks("README.md", []byte(cube))
+	var titles []string
+	for _, b := range bs {
+		titles = append(titles, fmt.Sprintf("%d %s", b.Level, b.Title))
+	}
+	if fmt.Sprint(titles) != "[0  1 Cube 2 Scramble 3 驗收 2 Notes 2 Notes]" {
+		t.Fatalf("blocks: %v", titles)
+	}
+	doc, cubeB, scramble, accept, notes1, notes2 := bs[0], bs[1], bs[2], bs[3], bs[4], bs[5]
+	if doc.Text != "Intro text." || doc.Start != 1 || doc.OwnEnd != 2 {
+		t.Fatalf("the document's own text: %+v", doc)
+	}
+	if cubeB.Parent != doc.Hash || scramble.Parent != cubeB.Hash || accept.Parent != scramble.Hash || notes1.Parent != cubeB.Hash {
+		t.Fatal("parents")
+	}
+	if cubeB.End != len(strings.Split(strings.TrimSuffix(cube, "\n"), "\n")) || scramble.End != notes1.Start-1 {
+		t.Fatalf("ranges: cube %d-%d scramble %d-%d", cubeB.Start, cubeB.End, scramble.Start, scramble.End)
+	}
+	if fmt.Sprint(cubeB.Links) != "[docs/turn.md img/a.png]" || len(scramble.Links) != 0 || fmt.Sprint(notes2.Links) != "[docs/ref.md]" {
+		t.Fatalf("links: %v %v %v", cubeB.Links, scramble.Links, notes2.Links)
+	}
+	if !accept.IsAcceptance() || fmt.Sprint(accept.Accept) != "[go test ./scramble go vet ./... npm test]" {
+		t.Fatalf("acceptance commands: %q", accept.Accept)
+	}
+	if notes1.Hash == notes2.Hash || notes1.Anchor != "notes" || notes2.Anchor != "notes-1" {
+		t.Fatal("two blocks alike in the same place still get two names")
+	}
+	if fmt.Sprint(accept.Heading) != "[Cube Scramble 驗收]" {
+		t.Fatalf("heading: %v", accept.Heading)
+	}
+
+	// Changing a child leaves its parent; changing the parent's own text
+	// leaves the child.
+	child := tig.ParseBlocks("README.md", []byte(strings.Replace(cube, "Random moves.", "Random turns.", 1)))
+	if child[1].Hash != cubeB.Hash || child[2].Hash == scramble.Hash {
+		t.Fatal("a child's change is only the child's")
+	}
+	parent := tig.ParseBlocks("README.md", []byte(strings.Replace(cube, "A Rubik's cube.", "A puzzle.", 1)))
+	if parent[1].Hash == cubeB.Hash || parent[2].Hash != scramble.Hash {
+		t.Fatal("a parent's change is only the parent's")
+	}
+	if other := tig.ParseBlocks("OTHER.md", []byte(cube)); other[2].Hash == scramble.Hash {
+		t.Fatal("where a block sits is part of what it is")
+	}
+}
+
+func FuzzParseBlocks(f *testing.F) {
+	f.Add(cube)
+	f.Add("# a\n```\n# b\n")
+	f.Add("####### seven\n#\n## ##\n   ### x ###\n~~~\n```\n~~~\n# after")
+	f.Fuzz(func(t *testing.T, s string) {
+		bs := tig.ParseBlocks("x.md", []byte(s))
+		if len(bs) == 0 || bs[0].Level != 0 {
+			t.Fatal("the first block is the document")
+		}
+		seen := map[string]bool{}
+		for _, b := range bs {
+			if !tig.ValidHash(b.Hash) || seen[b.Hash] || b.Start > b.End+1 || b.OwnEnd > b.End {
+				t.Fatalf("block %+v", b)
+			}
+			seen[b.Hash] = true
+		}
+	})
+}
+
+func TestLineage(t *testing.T) {
+	before := tig.ParseBlocks("d.md", []byte("# Game\n\n## Turn\n\nTurn one layer of the cube by ninety degrees.\n\n## Solved\n\nAll six faces have one colour each.\n\n## Old\n\nGone soon.\n\n## Big\n\nFirst part about drawing the cube on the page.\nSecond part about reading the mouse and the keys.\n"))
+	after := tig.ParseBlocks("d.md", []byte("# Puzzle\n\n## Turn\n\nTurn one layer of the cube by ninety degrees.\n\n## Solved\n\nAll six faces have one colour each, checked after every turn.\n\n## Drawing\n\nFirst part about drawing the cube on the page.\n\n## Input\n\nSecond part about reading the mouse and the keys.\n\n## New\n\nSomething else entirely.\n"))
+	ms, added, removed := tig.MatchBlocks(before, after)
+	kinds := map[string]string{}
+	title := map[string]string{}
+	for _, b := range append(before, after...) {
+		title[b.Hash] = b.Title
+	}
+	for _, m := range ms {
+		kinds[title[m.Old]+">"+title[m.New]] = m.Kind
+	}
+	want := map[string]string{
+		"Game>Puzzle":   "rewrite", // the heading was renamed
+		"Turn>Turn":     "move",    // same text, the heading above it changed
+		"Solved>Solved": "rewrite",
+		"Big>Drawing":   "split",
+		"Big>Input":     "split",
+	}
+	for k, v := range want {
+		if kinds[k] != v {
+			t.Errorf("%s: %q, want %q (all %v)", k, kinds[k], v, kinds)
+		}
+	}
+	if len(added) != 1 || title[added[0]] != "New" || len(removed) != 1 || title[removed[0]] != "Old" {
+		t.Fatalf("added %v removed %v", added, removed)
+	}
+}
+
+func TestSnapshotsRecordLineage(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	write(t, root, "README.md", "# A\n\nOne.\n")
+	r := open(t, root)
+	first, _, _ := r.Take(ctx, tig.ReasonScan, "")
+	os.WriteFile(filepath.Join(root, "README.md"), []byte("# A\n\nOne, changed.\n"), 0o644)
+	second, _, _ := r.Take(ctx, tig.ReasonScan, "")
+	if first.Lineage != "" || second.Lineage == "" {
+		t.Fatalf("lineage: %q %q", first.Lineage, second.Lineage)
+	}
+	l, err := tig.LoadLineage(ctx, r.Objects, second.Lineage)
+	if err != nil || len(l.Matches) != 1 || l.Matches[0].Kind != tig.MatchEdit {
+		t.Fatalf("%+v %v", l, err)
+	}
+}

@@ -12,7 +12,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/Justyr/tig"
+	"github.com/h94u041/tig"
 )
 
 func write(t *testing.T, dir, rel, text string) {

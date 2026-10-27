@@ -4,7 +4,7 @@ tig keeps a project's footprint, how the project was actually built step by step
 
 The idea is *Markdown as source*. The documents are what you write; the code is built from them, by people or by agents; tig keeps the two together and tells you when they drift apart. Because the footprint is a faithful record of one construction, another agent given the documents and the footprint can build the same thing again.
 
-A tig lives in the project's `.tig` folder and goes into Git with the project. Go programs can use it directly: `import "github.com/Justyr/tig"`. It is written in Go ([go.mod](go.mod), [go.sum](go.sum)) and MIT licensed ([LICENSE](LICENSE)).
+A tig lives in the project's `.tig` folder and goes into Git with the project. Go programs can use it directly: `import "github.com/h94u041/tig"`. It is written in Go ([go.mod](go.mod), [go.sum](go.sum)) and MIT licensed ([LICENSE](LICENSE)).
 
 This tig is not [tig, the text-mode interface for Git](https://github.com/jonas/tig); that is why its command is called `tigprint`.
 
@@ -15,7 +15,7 @@ Status: first release, 0.1. The `.tig` format is versioned and meant to last (se
 With Go 1.25 or later:
 
 ```sh
-go install github.com/Justyr/tig/cmd/tigprint@latest
+go install github.com/h94u041/tig/cmd/tigprint@latest
 ```
 
 ## Quick start

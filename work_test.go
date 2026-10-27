@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/Justyr/tig"
+	"github.com/h94u041/tig"
 )
 
 func TestWorkAndSteps(t *testing.T) {

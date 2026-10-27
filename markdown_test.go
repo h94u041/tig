@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Justyr/tig"
+	"github.com/h94u041/tig"
 )
 
 const cube = "Intro text.\n" +

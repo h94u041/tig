@@ -18,8 +18,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/Justyr/tig"
-	"github.com/Justyr/tig/mcpserver"
+	"github.com/h94u041/tig"
+	"github.com/h94u041/tig/mcpserver"
 )
 
 var version = "0.1.0"
