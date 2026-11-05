@@ -1,0 +1,395 @@
+package tig_test
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/h94u041/tig"
+)
+
+func TestMarksAreNotDesign(t *testing.T) {
+	bare := "# A\n\nThe cube turns one layer.\n"
+	marked := "# A\n\n**The cube turns one layer. *a1b2 c3d4***\n"
+	before := tig.ParseBlocks("d.md", []byte(bare))[1]
+	after := tig.ParseBlocks("d.md", []byte(marked))[1]
+	if before.Hash != after.Hash || after.Text != before.Text {
+		t.Fatalf("a mark changed the block: %q %q", before.Text, after.Text)
+	}
+	if len(after.Marks) != 1 || after.Marks[0].Text != "The cube turns one layer." || !slices.Equal(after.Marks[0].IDs, []string{"a1b2", "c3d4"}) ||
+		after.Marks[0].Line != 3 || after.Marks[0].Block != after.Hash {
+		t.Fatalf("marks: %+v", after.Marks)
+	}
+}
+
+func TestMarksRead(t *testing.T) {
+	cases := []struct {
+		name, line string
+		want       []string
+	}{
+		{"two on a line", "**one *aaaa*** and **two *bbbb***", []string{"one", "two"}},
+		{"bold then mark", "**x** then **two *bbbb cccc***", []string{"two"}},
+		{"inner emphasis", "**some *real* words *bbbb***", []string{"some *real* words"}},
+		{"plain bold", "**not a mark**", nil},
+		{"bold italics that are no IDs", "**word *word***", nil},
+		{"too short", "**word *abc***", nil},
+		{"inline code", "`**word *abcd***`", nil},
+		{"Chinese", "**魔術方塊一次轉一層。 *ab12***", []string{"魔術方塊一次轉一層。"}},
+	}
+	for _, c := range cases {
+		var got []string
+		for _, b := range tig.ParseBlocks("d.md", []byte("# A\n\n"+c.line+"\n")) {
+			for _, m := range b.Marks {
+				got = append(got, m.Text)
+			}
+		}
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s: %q", c.name, got)
+		}
+	}
+	fenced := "# A\n\n```\n**word *abcd***\n```\n"
+	if m := tig.ParseBlocks("d.md", []byte(fenced))[1]; len(m.Marks) != 0 || !strings.Contains(m.Text, "*abcd***") {
+		t.Fatalf("a code fence holds no marks: %+v", m)
+	}
+}
+
+func TestSetMark(t *testing.T) {
+	doc := []byte("# A\r\n\r\nIt turns.\r\n\r\n## B\r\n\r\nOther.\r\n")
+	in := tig.MarkInput{Sentence: "It turns.", IDs: []string{"aaaa"}}
+	out, err := tig.SetMark("d.md", doc, in)
+	if err != nil || !strings.Contains(string(out), "\r\n**It turns. *aaaa***\r\n") {
+		t.Fatalf("wrap: %q %v", out, err)
+	}
+	in.IDs = []string{"aaaa", "bbbb"}
+	if out, err = tig.SetMark("d.md", out, in); err != nil || !strings.Contains(string(out), "**It turns. *aaaa bbbb***") {
+		t.Fatalf("merge: %q %v", out, err)
+	}
+	out, err = tig.SetMark("d.md", doc, tig.MarkInput{Sentence: "New here.", Under: "A", IDs: []string{"cccc"}})
+	if err != nil || !strings.Contains(string(out), "It turns.\r\n\r\n**New here. *cccc***\r\n\r\n## B") {
+		t.Fatalf("under: %q %v", out, err)
+	}
+	out, err = tig.SetMark("d.md", doc, tig.MarkInput{Sentence: "In C.", Under: "C", IDs: []string{"cccc"}})
+	if err != nil || !strings.HasSuffix(string(out), "Other.\r\n\r\n## C\r\n\r\n**In C. *cccc***\r\n") {
+		t.Fatalf("new section: %q %v", out, err)
+	}
+	out, err = tig.SetMark("d.md", nil, tig.MarkInput{Sentence: "First.", IDs: []string{"cccc"}})
+	if err != nil || string(out) != "**First. *cccc***\n" {
+		t.Fatalf("empty: %q %v", out, err)
+	}
+	if _, err := tig.SetMark("d.md", doc, tig.MarkInput{Sentence: "a\nb", IDs: []string{"cccc"}}); err == nil {
+		t.Fatal("one line only")
+	}
+	if _, err := tig.SetMark("d.md", doc, tig.MarkInput{Sentence: "a"}); err == nil {
+		t.Fatal("a mark needs a commit")
+	}
+}
+
+// oneCommit writes a commit that changes a file.
+func oneCommit(t *testing.T, r *tig.Repo, root, file, content, intent string) tig.Work {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := r.StartWork(ctx, nil, intent, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	write(t, root, file, content)
+	if _, err := r.RecordStep(ctx, tig.StepInput{Kind: tig.StepEdit}); err != nil {
+		t.Fatal(err)
+	}
+	w, err := r.FinishWork(ctx, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+func codes(fs []tig.Finding) []string {
+	var out []string
+	for _, f := range fs {
+		if f.Code != "" {
+			out = append(out, f.Code)
+		}
+	}
+	return out
+}
+
+func TestShortIDs(t *testing.T) {
+	a := strings.Repeat("a", 64)
+	b := "aaaa" + strings.Repeat("b", 60)
+	c := "aaaab" + strings.Repeat("c", 59)
+	commits := tig.NewCommits([]tig.Work{{ID: a}, {ID: b}, {ID: c}})
+	if commits.Short(a) != "aaaa" || commits.Short(b) != "aaaab" || commits.Short(c) != "aaaabc" {
+		t.Fatal(commits.Short(a), commits.Short(b), commits.Short(c))
+	}
+	for short, id := range map[string]string{"aaaa": a, "aaaab": b, "aaaabc": c} {
+		if w, err := commits.Resolve(short); err != nil || w.ID != id {
+			t.Fatal(short, w.ID, err)
+		}
+	}
+	if _, err := commits.Resolve("zzzz"); err == nil {
+		t.Fatal("no such commit")
+	}
+	if _, err := commits.Resolve("aaa"); err == nil {
+		t.Fatal("at least four")
+	}
+	if w, err := commits.Resolve("aaaabb"); err != nil || w.ID != b {
+		t.Fatal("a longer prefix still resolves", err)
+	}
+}
+
+func TestMarkFoldAndCommitView(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	write(t, root, "README.md", "# A\n\nIt turns.\n")
+	r := open(t, root)
+	one := oneCommit(t, r, root, "a.go", "package a\n", "turn")
+	two := oneCommit(t, r, root, "b.go", "package b\n", "turn faster")
+	commits, _ := r.Commits(ctx)
+	s1, s2 := commits.Short(one.ID), commits.Short(two.ID)
+	if len(s1) != 4 {
+		t.Fatal(s1)
+	}
+	m, err := r.Mark(ctx, tig.MarkInput{Sentence: "It turns.", IDs: []string{s1, two.ID}})
+	if err != nil || !slices.Equal(m.IDs, []string{s1, s2}) {
+		t.Fatalf("%+v %v", m, err)
+	}
+	if _, err := r.Mark(ctx, tig.MarkInput{Sentence: "It turns.", IDs: []string{"ffff"}}); err == nil {
+		t.Fatal("no such commit")
+	}
+	a, err := r.Analyze(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Report.Marks != 1 || len(a.Report.Unbound) != 0 {
+		t.Fatalf("%+v", a.Report)
+	}
+	b := a.Marks()[0].Block
+	if built := a.Built[b]; !slices.Contains(built, "a.go") || !slices.Contains(built, "b.go") {
+		t.Fatal("what the commits built counts for the block:", built)
+	}
+	if len(a.Report.Undesigned) != 0 {
+		t.Fatal("a mark reaches its files:", a.Report.Undesigned)
+	}
+	if got := a.CommitsOf(b); len(got) != 2 || got[0].ID != one.ID {
+		t.Fatalf("%+v", got)
+	}
+	if got := a.Trail(b); len(got) != 2 || got[0].ID != two.ID {
+		t.Fatalf("trail: %+v", got)
+	}
+
+	parent, changed, err := r.Fold(ctx, tig.FoldInput{Commits: []string{s1, s2}, Intent: "turning", Actor: "agent"})
+	if err != nil || len(changed) != 1 {
+		t.Fatal(parent, changed, err)
+	}
+	commits, _ = r.Commits(ctx)
+	short := commits.Short(parent.ID)
+	data, _ := os.ReadFile(filepath.Join(root, "README.md"))
+	if !strings.Contains(string(data), "**It turns. *"+short+"***") {
+		t.Fatalf("%s", data)
+	}
+	a, _ = r.Analyze(ctx, "")
+	v, err := a.Commit(short)
+	if err != nil || !slices.Equal(v.ChildIDs, []string{s1, s2}) || !slices.Equal(v.Files, []string{"a.go", "b.go"}) || len(v.Marks) != 1 || v.Result != tig.ResultFolded {
+		t.Fatalf("%+v %v", v, err)
+	}
+	if w, err := a.Commit(s1); err != nil || w.ID != one.ID || len(w.Marks) != 1 {
+		t.Fatalf("a folded commit is still there: %+v %v", w, err)
+	}
+	if len(a.Report.Unbound) != 0 || !slices.Contains(a.Built[a.Marks()[0].Block], "b.go") {
+		t.Fatalf("%+v", a.Report)
+	}
+	if _, _, err := r.Fold(ctx, tig.FoldInput{Commits: []string{s1, s1}}); err == nil {
+		t.Fatal("two commits at least")
+	}
+}
+
+func TestMarkFindings(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	write(t, root, "README.md", "# A\n\nIt turns.\n\nBroken **word *dead***\n")
+	r := open(t, root)
+	w := oneCommit(t, r, root, "a.go", "package a\n", "turn")
+	free := oneCommit(t, r, root, "b.go", "package b\n", "not in the design")
+	if _, err := r.Mark(ctx, tig.MarkInput{Sentence: "It turns.", IDs: []string{w.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.Take(ctx, tig.ReasonScan, ""); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := r.Analyze(ctx, "")
+	if got := codes(a.Report.Broken); !slices.Equal(got, []string{tig.FindBrokenMark}) {
+		t.Fatal(got, a.Report.Broken)
+	}
+	if len(codes(a.Report.Stale)) != 0 {
+		t.Fatalf("nothing moved yet: %+v", a.Report.Stale)
+	}
+	commits, _ := r.Commits(ctx)
+	if !slices.Equal(a.Report.Unbound, []string{commits.Short(free.ID)}) {
+		t.Fatal(a.Report.Unbound)
+	}
+
+	// The code moves outside any commit.
+	write(t, root, "a.go", "package a // changed by hand\n")
+	a, _ = r.Analyze(ctx, "")
+	if got := codes(a.Report.Stale); !slices.Equal(got, []string{tig.FindCodeAway}) {
+		t.Fatal(got)
+	}
+	// A commit brings it back into the footprint.
+	follow := oneCommit(t, r, root, "a.go", "package a // and committed\n", "follow")
+	a, _ = r.Analyze(ctx, "")
+	if got := codes(a.Report.Stale); len(got) != 0 {
+		t.Fatal("the file is in the footprint again:", got)
+	}
+
+	// The sentence is reworded: seen before and after the snapshot.
+	short := commits.Short(w.ID)
+	write(t, root, "README.md", "# A\n\n**It turns twice. *"+short+"***\n")
+	a, _ = r.Analyze(ctx, "")
+	if got := codes(a.Report.Stale); !slices.Equal(got, []string{tig.FindIntentChanged}) {
+		t.Fatal(got)
+	}
+	if _, _, err := r.Take(ctx, tig.ReasonScan, ""); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = r.Analyze(ctx, "")
+	if got := codes(a.Report.Stale); !slices.Equal(got, []string{tig.FindIntentChanged}) {
+		t.Fatal(got)
+	}
+	// A new commit joining the sentence answers it.
+	if _, err := r.Mark(ctx, tig.MarkInput{Sentence: "It turns twice.", IDs: []string{follow.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = r.Analyze(ctx, "")
+	if got := codes(a.Report.Stale); len(got) != 0 {
+		t.Fatal("a commit followed the sentence:", got)
+	}
+}
+
+func TestBaseline(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	write(t, root, "README.md", "# A\n\nThe old part.\n")
+	write(t, root, "old.go", "package old\n")
+	r := open(t, root)
+	base, err := r.Baseline(ctx, "before tig", "user")
+	if err != nil || base.Result != tig.ResultBaseline {
+		t.Fatal(base, err)
+	}
+	if _, err := r.Baseline(ctx, "again", "user"); err == nil {
+		t.Fatal("one baseline")
+	}
+	a, _ := r.Analyze(ctx, "")
+	if len(a.Report.Unbound) != 0 || !slices.Contains(a.Report.Undesigned, "old.go") {
+		t.Fatalf("no design reaches it yet: %+v", a.Report)
+	}
+	if _, err := r.Mark(ctx, tig.MarkInput{Sentence: "The old part.", IDs: []string{base.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = r.Analyze(ctx, "")
+	if len(a.Report.Undesigned) != 0 || !slices.Contains(a.Built[a.Marks()[0].Block], "old.go") {
+		t.Fatalf("the sentence reaches the old code: %+v", a.Report)
+	}
+}
+
+func TestSessionsWorkAtOnce(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	write(t, root, "README.md", "# A\n")
+	r := open(t, root)
+	alice, bob := *r, *r
+	alice.Session, bob.Session = "alice", "bob"
+	if _, err := alice.StartWork(ctx, nil, "one", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bob.StartWork(ctx, nil, "two", "bob"); err != nil {
+		t.Fatal("the second session is not held up:", err)
+	}
+	if _, err := alice.StartWork(ctx, nil, "again", "alice"); !errors.Is(err, tig.ErrWorkOpen) {
+		t.Fatal("one work a session:", err)
+	}
+	bad := *r
+	bad.Session = "../up"
+	if _, err := bad.StartWork(ctx, nil, "x", ""); err == nil {
+		t.Fatal("a session name stays in the cache")
+	}
+	if open, err := r.OpenWorks(); err != nil || len(open) != 2 {
+		t.Fatal(open, err)
+	}
+	w1, err := alice.FinishWork(ctx, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w2, err := bob.FinishWork(ctx, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	works, _ := r.Works(ctx, 0)
+	if len(works) != 2 || works[0].ID != w2.ID || works[1].ID != w1.ID {
+		t.Fatalf("no work lost: %+v", works)
+	}
+	if open, _ := r.OpenWorks(); len(open) != 0 {
+		t.Fatal(open)
+	}
+}
+
+func TestDropMarks(t *testing.T) {
+	in := "**a *a1b2 c3d4*** and **b *a1b2***\n\n```\n**c *a1b2***\n```\n"
+	want := "**a *c3d4*** and b\n\n```\n**c *a1b2***\n```\n"
+	if got := string(tig.DropMarks([]byte(in), []string{"a1b2"})); got != want {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestMarkMakesTheFolder(t *testing.T) {
+	ctx := context.Background()
+	r := tig.Open(t.TempDir())
+	if err := r.Init(tig.Config{Root: ".tealprint/tealprint.md"}); err != nil {
+		t.Fatal(err)
+	}
+	w, err := r.PutWork(ctx, tig.Work{Intent: "x", Result: tig.ResultDone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Mark(ctx, tig.MarkInput{Sentence: "第一句", IDs: []string{w.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := r.Unmark(ctx, []string{w.ID})
+	if err != nil || len(changed) != 1 {
+		t.Fatalf("unmark: %v %v", changed, err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(r.Root, ".tealprint", "tealprint.md"))
+	if strings.Contains(string(raw), "**") || !strings.Contains(string(raw), "第一句") {
+		t.Fatalf("doc: %q", raw)
+	}
+}
+
+// A sentence with no commit yet goes into the design: under its section, or a
+// new one, and only once.
+func TestAddSentence(t *testing.T) {
+	doc := []byte("# A\n\n## Parts\n\nOne.\n\n## Other\n\nTwo.\n")
+	got, err := tig.AddSentence("d.md", doc, "Three.", "Parts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(got); !strings.Contains(s, "One.") || strings.Index(s, "Three.") > strings.Index(s, "## Other") || strings.Index(s, "Three.") < strings.Index(s, "## Parts") {
+		t.Fatalf("under Parts:\n%s", s)
+	}
+	again, err := tig.AddSentence("d.md", got, "Three.", "Parts")
+	if err != nil || string(again) != string(got) {
+		t.Fatalf("written twice:\n%s (%v)", again, err)
+	}
+	made, err := tig.AddSentence("d.md", doc, "Four.", "New")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(made); !strings.Contains(s, "## New") || strings.Index(s, "Four.") < strings.Index(s, "## New") {
+		t.Fatalf("a new section:\n%s", s)
+	}
+	fresh, err := tig.AddSentence("d.md", nil, "Five.", "")
+	if err != nil || !strings.Contains(string(fresh), "Five.") {
+		t.Fatalf("an empty document: %q %v", fresh, err)
+	}
+}

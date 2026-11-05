@@ -47,20 +47,20 @@ func TestCLI(t *testing.T) {
 	if code != 0 {
 		t.Fatal(out)
 	}
-	want(t, out, "tig started", "main document README.md, verify loose")
+	want(t, out, "tig started", "main document README.md")
 	if attrs, _ := os.ReadFile(filepath.Join(dir, ".tig", ".gitattributes")); !strings.Contains(string(attrs), "* -text") {
 		t.Fatalf("Git must not change the objects' line endings: %q", attrs)
 	}
 
 	_, out = tp(t, dir, "chain")
-	want(t, out, "# Counter  [direction]", "## Acceptance")
+	want(t, out, "# Counter", "## Acceptance")
 	_, out = tp(t, dir, "blocks", filepath.Join(dir, "README.md"))
 	want(t, out, "# Counter", "$ echo counted")
 
 	if code, out = tp(t, dir, "check"); code != 0 {
 		t.Fatalf("closed, nothing passed yet: %d\n%s", code, out)
 	}
-	want(t, out, "closed: yes", "never   echo counted")
+	want(t, out, "closed: yes")
 
 	write(t, dir, "src/stray.js", "x\n")
 	if code, out = tp(t, dir, "check"); code != 1 {
@@ -68,11 +68,6 @@ func TestCLI(t *testing.T) {
 	}
 	want(t, out, "closed: no", "no design reaches:\n  src/stray.js")
 	os.Remove(filepath.Join(dir, "src/stray.js"))
-
-	if code, out = tp(t, dir, "check", "-run-all"); code != 0 {
-		t.Fatalf("run all: %d\n%s", code, out)
-	}
-	want(t, out, "passed  echo counted", "guidelines 1", "by tig")
 
 	// A work by hand.
 	_, out = tp(t, dir, "chain")
@@ -93,9 +88,37 @@ func TestCLI(t *testing.T) {
 	_, out = tp(t, dir, "trail", "-steps", "src/count.js")
 	want(t, out, "count by two", "edit     by two", "M src/count.js")
 	_, out = tp(t, dir, "show", counter)
-	want(t, out, "status: guideline", "links to: src/count.js", "count by two")
+	want(t, out, "links to: src/count.js", "count by two")
 	_, out = tp(t, dir, "search", "counts")
 	want(t, out, "block", "README.md")
+
+	// What a line means, and what any reference says.
+	_, out = tp(t, dir, "commits")
+	commit := strings.Fields(out)[0]
+	if code, out = tp(t, dir, "mark", "-id", commit, "-confirm", "Counts up."); code != 0 {
+		t.Fatal(out)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "README.md"))
+	want(t, string(data), "Counts up. Code: [count](src/count.js). <tig l=\"")
+	_, out = tp(t, dir, "show", commit)
+	want(t, out, "count by two", "intent i")
+	intent := out[strings.Index(out, "intent ")+7:]
+	intent = intent[:strings.Index(intent, "#")]
+	_, out = tp(t, dir, "show", intent)
+	want(t, out, "confirmed (human via direct)", "text   Counts up.", "README.md:3", "sync   ok")
+	write(t, dir, "README.md", strings.Replace(string(data), "Counts up.", "Counts down.", 1))
+	_, out = tp(t, dir, "sync")
+	want(t, out, "1 intents touched", "touched "+intent)
+	_, out = tp(t, dir, "show", intent)
+	want(t, out, "#2", "text   Counts down.", "sync   review", "before "+intent+"#1")
+	_, out = tp(t, dir, "confirm", "-m", "yes, down", intent)
+	want(t, out, "confirmed")
+	_, out = tp(t, dir, "show", intent)
+	want(t, out, "sync   ok")
+	_, out = tp(t, dir, "accept", "-m", "looks right", commit)
+	want(t, out, "accepted")
+	write(t, dir, "README.md", string(data))
+	tp(t, dir, "sync")
 
 	_, out = tp(t, dir, "log")
 	// The opening snapshot and the one after the work; snapshots that would

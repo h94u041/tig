@@ -6,14 +6,20 @@
 
 | Tool | What it does |
 |---|---|
-| `overview` | Start here: the chain's outline with each block's status, whether the chain is closed, the counts, and the work in progress. Paged. |
+| `overview` | Start here: the chain's outline, whether the chain is closed, the counts, and the work in progress. Paged. |
 | `search` | Blocks, works, steps and files containing every word. Keyword only: no hit does not mean there is nothing. |
-| `read_block` | One block: its text, status and acceptance, its sections, the detail documents and files it links to, what was built for it, what it was before it changed, and its latest works. |
+| `read_block` | One block: its text, its sections, the detail documents and files it links to, what was built for it, what it was before it changed, and its latest works. |
 | `follow` | Walk the chain from a block, down (sections, detail documents, files) or up. |
 | `trail` | The works done for a block, everything under it and its detail documents included, or for a file; newest first. With `steps`, each step and the files it changed. |
 | `read_file` | A project file as it is now, or as it was in a tree of the footprint. Paged. |
-| `check` | The closure report. With `run`, tig runs one acceptance section itself. |
+| `check` | The closure report. It only reads. |
 | `start_work`, `record_step`, `finish_work` | Leave a footprint: start a work for some blocks, record each step, finish it. |
+| `read_commit` | One commit by its short ID: its intent, files, the sentences naming it, the commits it folds. |
+| `relation_set` | What a piece of work needs: from sentences, commits or files, the sentences, commits and files one step away. |
+| `mark_sentence` | Say which commits follow a sentence. A sentence the main document already says is bound there; any other is a guess, written to the inferred document as proposed by an AI. An agent cannot confirm an intent. |
+| `resolve` | What any reference means: an intent, a line, a commit or an event. |
+| `sync_lines` | Bring the ledger up to edited lines: new marks, and the intents on them follow. |
+| `fold_commits` | Fold commits under a new parent; lines then show the parent, and nothing disappears. |
 | `propose_link` | Propose that a block belongs with a file or another block. It is recorded as inferred. |
 
 Resources: `tig://block/{hash}`, `tig://work/{hash}`, `tig://step/{hash}` and `tig://object/{hash}`.
@@ -21,8 +27,10 @@ Resources: `tig://block/{hash}`, `tig://work/{hash}`, `tig://step/{hash}` and `t
 ## How an agent works with it
 
 1. `overview`; then `read_block` and `follow` the blocks the task is about, and `trail` them to see how they were built.
-2. `start_work` with those blocks. Change the files, then `record_step` an `edit`: tig records exactly what changed. Run the acceptance commands and record each as a `check`, or use `check` with `run` when the server allows it.
-3. `finish_work`, then `check`: is the chain still closed?
+2. `start_work` with those blocks. Change the files, then `record_step` an `edit`: tig records exactly what changed. Run whatever checks the work and record each as a `check`. Leave the `<tig …/>` marks in place when editing a document: `sync_lines` replaces them.
+3. `finish_work`, then `mark_sentence`: say which sentences the commit followed. `check`: is the chain still closed, and has any line or its code moved without the other?
+
+Agents working at the same time each pass their own `session`.
 
 Following another agent's footprint is how a second agent builds the same thing again: `trail` with `steps` gives every edit and the tree after it, and `read_file` reads a file in that tree.
 
@@ -30,9 +38,10 @@ Every record carries an actor: the MCP client's name, unless the call names one.
 
 ## Safety
 
-- tig runs only the commands written in acceptance sections, and over MCP only when the server was started with `-run`. Without that switch an agent cannot make tig run anything, since it could edit a document first.
+- tig runs nothing: an agent cannot make it run a command, since it could edit a document first.
+- An agent cannot confirm an intent or accept a commit: those tools are not served. Its sentences are recorded as guesses, by `ai`.
 - `read_file` reads only the project's own files: nothing outside the project, nothing Git ignores, nothing in `.git` or `.tig`, nothing through a symbolic link.
-- A check an agent reports is never recorded as run by tig; with `verify strict`, only tig's own runs count.
+- A check an agent reports is recorded as what that agent said, and tig passes no verdict on it.
 
 ## Acceptance
 

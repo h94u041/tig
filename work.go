@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"time"
 )
@@ -38,10 +39,11 @@ const (
 	ResultDone       = "done" // finished without a check
 	ResultRolledBack = "rolled-back"
 	ResultAbandoned  = "abandoned"
+	ResultFolded     = "folded"   // holds no changes of its own: it folds its children
+	ResultBaseline   = "baseline" // everything the project was before it joined tig
 )
 
-// RunnerTig marks a check tig ran itself (only these count when the project
-// verifies strictly).
+// RunnerTig marks a check tig ran itself, in records from when it ran them.
 const RunnerTig = "tig"
 
 // Step is one thing done in a work.
@@ -74,6 +76,7 @@ type Work struct {
 	Before    string              `json:"before,omitempty"` // snapshots
 	After     string              `json:"after,omitempty"`
 	Steps     []string            `json:"steps,omitempty"`
+	Children  []string            `json:"children,omitempty"` // the commits it folds
 	Result    string              `json:"result"`
 	Actor     string              `json:"actor,omitempty"`
 	Approvers []string            `json:"approvers,omitempty"`
@@ -165,6 +168,7 @@ func (r *Repo) putWork(ctx context.Context, w Work) (Work, error) {
 	rec.set("before", w.Before)
 	rec.set("after", w.After)
 	rec.setAll("step", w.Steps)
+	rec.setAll("child", w.Children)
 	rec.set("result", w.Result)
 	rec.set("actor", w.Actor)
 	rec.setAll("approver", w.Approvers)
@@ -190,9 +194,9 @@ func LoadWork(ctx context.Context, objects Objects, id string) (Work, error) {
 		return Work{}, fmt.Errorf("tig: %s is not a work", id)
 	}
 	w := Work{ID: id, Parent: rec.get("parent"), Basis: rec.all("basis"), Intent: rec.get("intent"),
-		Before: rec.get("before"), After: rec.get("after"), Steps: rec.all("step"), Result: rec.get("result"),
+		Before: rec.get("before"), After: rec.get("after"), Steps: rec.all("step"), Children: rec.all("child"), Result: rec.get("result"),
 		Actor: rec.get("actor"), Approvers: rec.all("approver"), Started: rec.time("started"), At: rec.time("at"), Extra: rec.extra()}
-	if err := hashesValid(id, append(append([]string{}, w.Basis...), w.Steps...), w.Parent, w.Before, w.After); err != nil {
+	if err := hashesValid(id, append(append(append([]string{}, w.Basis...), w.Steps...), w.Children...), w.Parent, w.Before, w.After); err != nil {
 		return Work{}, err
 	}
 	return w, nil
@@ -227,9 +231,10 @@ func (r *Repo) Works(ctx context.Context, n int) ([]Work, error) {
 	return out, nil
 }
 
-// Open works: one work at a time is in progress in a project.
+// Open works: one work at a time is in progress in each session. The session
+// with no name is .tig/WORK; a named one lives in the local cache.
 
-// OpenWork is the work in progress (.tig/WORK).
+// OpenWork is a session's work in progress.
 type OpenWork struct {
 	Basis   []string  `json:"basis,omitempty"`
 	Intent  string    `json:"intent"`
@@ -245,9 +250,43 @@ var ErrNoWork = errors.New("tig: no work in progress (start one first)")
 
 // ErrWorkOpen is returned when a work is started while another one is in
 // progress.
-var ErrWorkOpen = errors.New("tig: a work is already in progress (finish it first)")
+var ErrWorkOpen = errors.New("tig: a work is already in progress in this session (finish it first, or work in a session of your own)")
 
-func (r *Repo) workFile() string { return filepath.Join(r.Dir, "WORK") }
+var sessionName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+func (r *Repo) workFile() string {
+	if r.Session == "" {
+		return filepath.Join(r.Dir, "WORK")
+	}
+	return filepath.Join(r.cacheDir(), "work-"+r.Session)
+}
+
+// OpenWorks is every session's work in progress.
+func (r *Repo) OpenWorks() ([]OpenWork, error) {
+	if r.Dir == "" {
+		return nil, nil
+	}
+	files, err := filepath.Glob(filepath.Join(r.cacheDir(), "work-*"))
+	if err != nil {
+		return nil, err
+	}
+	var out []OpenWork
+	for _, f := range append([]string{filepath.Join(r.Dir, "WORK")}, files...) {
+		raw, err := os.ReadFile(f)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		var w OpenWork
+		if err := json.Unmarshal(raw, &w); err != nil {
+			return nil, fmt.Errorf("tig: %s: %w", filepath.Base(f), err)
+		}
+		out = append(out, w)
+	}
+	return out, nil
+}
 
 // Current is the work in progress, if any.
 func (r *Repo) Current() (*OpenWork, error) {
@@ -263,7 +302,7 @@ func (r *Repo) Current() (*OpenWork, error) {
 	}
 	var w OpenWork
 	if err := json.Unmarshal(raw, &w); err != nil {
-		return nil, fmt.Errorf("tig: .tig/WORK: %w", err)
+		return nil, fmt.Errorf("tig: %s: %w", filepath.Base(r.workFile()), err)
 	}
 	return &w, nil
 }
@@ -273,6 +312,9 @@ func (r *Repo) saveCurrent(w *OpenWork) error {
 	if err != nil {
 		return err
 	}
+	if err := os.MkdirAll(filepath.Dir(r.workFile()), 0o755); err != nil {
+		return err
+	}
 	return writeAtomic(r.workFile(), raw, 0o644)
 }
 
@@ -280,6 +322,9 @@ func (r *Repo) saveCurrent(w *OpenWork) error {
 func (r *Repo) StartWork(ctx context.Context, basis []string, intent, actor string) (*OpenWork, error) {
 	if r.Dir == "" {
 		return nil, errors.New("tig: works need a .tig folder")
+	}
+	if r.Session != "" && !sessionName.MatchString(r.Session) {
+		return nil, fmt.Errorf("tig: %q is not a session name", r.Session)
 	}
 	if err := hashesValid("work", basis); err != nil {
 		return nil, err

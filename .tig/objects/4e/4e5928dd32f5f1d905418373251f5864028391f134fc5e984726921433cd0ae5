@@ -1,0 +1,9 @@
+tig-step 1
+kind check
+basis 9fa071996a87f3594a2154b8b0a4fff54a7321ef09550e86b06ad28ecd25866b
+command go test -run "Blocks|Lineage|Chain|Stale|Cover|Open|Mark" .
+exit 0
+output 28709df8726d0793f70a5108016f10216c3fe52deee01f682a906e3ed5cfcf9f
+runner tig
+actor cli
+at 2026-11-04T16:04:22.2795893Z

@@ -1,0 +1,7 @@
+tig-step 1
+kind edit
+before 1c7ec9091379c62c7862faf91369f932e89b2545fdd4261d5b8afea75e3dc439
+after 919719d44e5bed94a63901ca4491ec63a4325cf6e1c75abf0c03c76bf9a03fad
+note AddSentence 與 insertLine；關聯、集合、分群的測試與文件
+actor claude
+at 2026-11-04T17:20:00.9857383Z

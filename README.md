@@ -1,6 +1,6 @@
 # tig
 
-**Markdown as source.** tig makes a project's Markdown documents the source of truth for its code, hosts them as an MCP server that any AI agent can build from, and keeps a faithful footprint of every construction, so the work can be checked, controlled and reproduced.
+**Markdown as source.** tig is a ledger of intent and footprint: it makes a project's Markdown documents the source of truth for its code, hosts them as an MCP server that any AI agent can build from, and records what each line means, who agreed with it, and every construction that followed it.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/h94u041/tig.svg)](https://pkg.go.dev/github.com/h94u041/tig)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
@@ -14,16 +14,16 @@
 Agents now write code faster than anyone can read it. What gets lost is not the code but everything around it:
 
 - **Intent.** Git records which lines changed, not which part of the design they were for. Six months later nobody can say why a file looks the way it does.
-- **Evidence.** A design document says what should be true; nothing says whether it still is. Docs drift from code silently, and tests check the code, not whether every part of the design is tested at all.
+- **Agreement.** A design document says what should be true, but not who said so: a person, or an agent guessing. Docs drift from code silently, and an edit to one sentence looks the same as a change of mind about everything around it.
 - **Handoff.** Every agent session starts cold. It re-reads the project, guesses which documents are current, and repeats work another agent already did, or undoes it.
 
-tig closes these gaps with one idea: the design is written as Markdown, every part of it says how it is accepted, and every piece of work is recorded against the part of the design it serves.
+tig closes these gaps with one idea: the design is written as Markdown, each line carries a small mark that leads to what it means, and every piece of work is recorded against that meaning. tig records; it does not judge. Whether a piece of work is good enough is decided by you or by the tool you run on top of it, and tig keeps the decision.
 
 ## What is tig
 
-- **You write the design** as ordinary Markdown: a main document that links to detail documents, and in each part an *Acceptance* section listing the commands that prove it works.
+- **You write the design** as ordinary Markdown: a main document that links to detail documents. A guess an agent makes waits in a separate inferred document until someone agrees with it.
 - **Agents build from it** over MCP. They read and follow the design, see how it was built before, and record every step of their own work against the part of the design it serves.
-- **tig checks the result.** It tells you whether every piece of design is covered by an acceptance (the chain is *closed*), whether it passed, and where code and design have drifted apart.
+- **tig keeps the record.** It tells you what a line means and who said so, which commits followed it, which of those are still candidates, and where code and design have drifted apart.
 
 Everything lives in the project's `.tig` folder: plain, content-addressed records that go into Git with the project. A tig is portable: hand someone the documents and the footprint, and their agent can build the same thing again.
 
@@ -31,32 +31,33 @@ Everything lives in the project's `.tig` folder: plain, content-addressed record
 
 Code is becoming cheap; knowing what it is for, and that it holds, is not. That is where tig is aimed:
 
-- **A contract between people and agents.** A closed chain is a specification an agent can execute and a person can verify: directions say what to build, guidelines what was built and holds. "Is the chain closed?" can gate a merge the way "do the tests pass?" does today.
-- **Memory that outlives a session.** The footprint is shared state for every agent and person on a project: what was done, for which design, by whom, and whether it passed. The next agent starts where the last one stopped, not from zero.
+- **A contract between people and agents.** Confirmed intents are what an agent may build from; its own guesses stay marked as guesses. "Is every line of this change agreed with?" can gate a merge the way "do the tests pass?" does today.
+- **Memory that outlives a session.** The footprint is shared state for every agent and person on a project: what was done, for which intent, by whom, and whether anyone accepted it. The next agent starts where the last one stopped, not from zero.
 - **Traceability without bureaucracy.** Safety-critical and regulated fields demand that every requirement trace to its implementation and its test evidence, and usually pay for it with heavyweight tools. tig gives the same trace in plain text, in Git, kept up to date as a side effect of the work.
-- **Reviewing design, not diffs.** Because every block of design is named by its content and followed through edits, a change can be reviewed as "this part of the design changed, and these files followed it, or did not."
-- **Publishing what a project promises and proves, without its code.** With the hub, a team can show its design and which parts are verified while the implementation stays private: open specifications for closed implementations, course material, and audits.
+- **Reviewing design, not diffs.** Because every intent has an identity that survives edits, a change can be reviewed as "this meaning changed, and these commits followed it, or did not." An edit reaches only the intents whose range it touched.
+- **Publishing what a project promises, without its code.** With the hub, a team can show its design and how it holds together while the implementation stays private: open specifications for closed implementations, course material, and audits.
 
-What tig does not do: an acceptance is only as strong as its commands, and in `loose` mode tig believes the checks agents report (use `strict` when that matters). Search is keyword search. tig shows where design and code disagree; deciding which one is right stays with you.
+What tig does not do: it runs no checks and passes no verdicts, and a check an agent records is only what the agent said. Search is keyword search. tig shows where design and code disagree; deciding which one is right stays with you.
 
 ## Features
 
-- **An MCP server for your project.** `tigprint mcp` serves the documents and the footprint to any MCP client (Claude Code, Cursor and others): an overview, keyword search, reading and following blocks of design, the footprint of each block or file, the closure check, and tools to record new work.
+- **An MCP server for your project.** `tigprint mcp` serves the documents and the footprint to any MCP client (Claude Code, Cursor and others): an overview, keyword search, reading and following blocks of design, the footprint of each block or file, the closure check, what any reference means, and tools to record new work.
 - **Documents as one chain.** The main document, its detail documents and the files they link to are read as one whole. Every text block is named by its content hash, and tig follows each block through edits, moves, splits and merges by fixed, recomputable rules.
+- **Lines bound to code.** A line of a document carries a mark, `The cube turns one layer at a time. <tig l="c3d4e5"/>`, invisible in any Markdown viewer. The ledger holds the rest: the intents on that line, each with its range of characters, any number of them overlapping, and the commits following each. Edit the line and it gets a new hash; only the intents the edit reached need another look. When a line or its code moves without the other, `check` says so.
 - **A faithful footprint.** Each *work* (one construction, like a commit) records the design it was for, its intent, the project before and after, and its *steps*: every edit with exactly the files it changed, every command, check and decision.
 - **Agent-level reproduction.** The footprint is complete enough that a second agent, given only the documents and the footprint, can rebuild what the first one built. tig's own tests do exactly that.
-- **Closure checks.** Broken links, design no acceptance covers, code changed outside the footprint or left behind by a design change, and files no design reaches. Covered design is a *direction* until its acceptance passes, then a *guideline*.
-- **Control over what runs.** tig runs only the commands written in acceptance sections, and over MCP only when you start the server with `-run`. In `strict` mode only the checks tig ran itself count; an agent cannot simply report success.
-- **A hub to publish to.** `tigprint push` sends the documents and the chain, never the code, to a `tighub`, which checks every push and shows each document block by block with its status.
+- **Closure checks.** Broken links and marks, confirmed intents waiting for another look, code changed outside the footprint or left behind by a design change, and files no design reaches.
+- **Decisions on record.** Each intent is proposed, confirmed, revised or retired by someone, by a person or by an AI, and each commit is a candidate until it is accepted or rejected. The events are append-only and merge by union. tig runs nothing.
+- **A hub to publish to.** `tigprint push` sends the documents and the chain, never the code, to a `tighub`, which checks every push and shows each document block by block.
 - **Safe and portable.** Objects are verified against their hashes on every read, paths from other people's trees cannot escape the project, and concurrent writers never lose a record. The format is plain text, versioned and meant to last.
 
 ## Use cases
 
-- **Education and assignments.** Host a closed design as an MCP server and hand it out. Every student's agent builds against the same scenarios, and each submission is a footprint whose acceptance can be checked, by tig itself in strict mode.
-- **Tracking and controlling agent work.** Every agent action is recorded against the design it was meant to serve: what was done, by whom, why, and whether it passed.
+- **Education and assignments.** Host a closed design as an MCP server and hand it out. Every student's agent builds against the same scenarios, and each submission is a footprint that shows what was built for which intent.
+- **Tracking and controlling agent work.** Every agent action is recorded against the design it was meant to serve: what was done, by whom, why, and whether it was accepted.
 - **Multi-agent coworking.** Agents share one design and one footprint, so each sees what the others built and picks up where they left off.
 - **Design that stays true.** When the design changes and the code does not follow, or the code changes outside any recorded work, tig says so.
-- **Showing the design without the code.** Push to a hub so reviewers, clients or students can read the design and see what is verified, without access to the source.
+- **Showing the design without the code.** Push to a hub so reviewers, clients or students can read the design and how it holds together, without access to the source.
 
 ## Install
 
@@ -74,21 +75,18 @@ In a project whose main document is `README.md`:
 
 ```sh
 tigprint init              # start .tig here
-tigprint chain             # every text block of the chain and its status
+tigprint chain             # every text block of the chain
 tigprint check             # is the chain closed? (exit status 1 when not)
-tigprint check -run-all    # have tig run every acceptance section itself
+tigprint mark -confirm "A layer of the cube turns."   # say what a line means
+tigprint show i7f3a        # what any reference means
 ```
 
-A section titled `Acceptance` lists the commands that accept the part of the document it sits in:
+Marking a line writes a small mark at its end and an intent in the ledger:
 
 ````markdown
 ## Turning
 
-How a layer of the cube turns. Code: [turn.js](src/turn.js).
-
-### Acceptance
-
-- `npm test -- turn`
+A layer of the cube turns. <tig l="c3d4e5"/>
 ````
 
 Then connect your agents. For Claude Code:
@@ -103,7 +101,7 @@ Or in any MCP client's configuration:
 { "mcpServers": { "tig": { "command": "tigprint", "args": ["mcp"] } } }
 ```
 
-`tigprint mcp` serves the project it is started in (or `-C dir`). Add `-run` to let agents have tig run acceptance commands.
+`tigprint mcp` serves the project it is started in (or `-C dir`).
 
 ## How it works
 
@@ -115,7 +113,7 @@ Snapshots of the project as content-addressed trees, and the works done on it, e
 
 ### Chain
 
-Text blocks named by content hash, their lineage from snapshot to snapshot, the chain from the main document to the files built for it, and the closure rules. See [the chain](docs/chain.md).
+Text blocks named by content hash, line marks, intents and references, the chain from the main document to the files built for it, and the closure rules. See [the chain](docs/chain.md).
 
 ### MCP
 
@@ -131,15 +129,17 @@ The tools and resources `tigprint mcp` gives agents, how an agent works with the
 
 | Command | What it does |
 |---|---|
-| `init` | start a tig in this folder (`-root` the main document, `-strict` to count only checks tig runs) |
+| `init` | start a tig in this folder (`-root` the main document) |
 | `snap`, `log`, `diff`, `restore` | snapshots: take one, list them, compare, put files back |
 | `blocks <file.md>` | a document's text blocks and their hashes |
-| `chain` | every block of the chain and its status |
-| `show <block>` | one block: its text, status, details, what was built for it and its works |
+| `chain` | every block of the chain |
+| `show <block or reference>` | one block, or what a reference means: `i7f3a`, `i7f3a#2`, `lc3d4e5:5-14`, `a1b2`, `ev91c0` |
 | `search <words>` | blocks, works, steps and files containing every word |
-| `check` | the closure report; `-run <block>` or `-run-all` to run acceptance first; `-json` |
+| `check` | the closure report; `-json` |
 | `trail <block or file>` | the works done for it; `-steps` for each step and the files it changed |
 | `work start`, `work step`, `work finish` | leave a footprint by hand |
+| `mark`, `sync`, `unmark` | say what a line means; bring the ledger up to edited lines; withdraw undone commits |
+| `confirm`, `reject`, `retire`, `accept` | record a decision on an intent or a commit |
 | `mcp` | serve this tig over MCP on stdin and stdout |
 | `push [-token t] [-m note] <url>` | send the documents and the chain to a hub |
 
@@ -151,7 +151,7 @@ The `.tig` folder holds plain text objects and records, versioned, so other tool
 
 ## Status
 
-First release, 0.1. The `.tig` format is versioned and meant to last; the commands and the MCP tools may still change. This repository is its own closed chain: its `.tig` holds the footprint of how it was built, and every acceptance section passes when tig runs it.
+First release, 0.1. The `.tig` format is versioned and meant to last; the commands and the MCP tools may still change. This repository is its own closed chain: its `.tig` holds the footprint of how it was built, and its acceptance sections list the commands to run by hand.
 
 This English README is the source. The translations follow it and are kept out of the chain (`outside` in `.tig/config`); where they differ, this one holds.
 

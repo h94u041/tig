@@ -1,0 +1,9 @@
+tig-step 1
+kind check
+basis a7ac6417a1c333e9a4c7a32e4af6ffa0fb050bb0764606f3157d0250b66d7c04
+command go test -run "Objects|OldTrees" .
+exit 0
+output 01c6e2fecfc94df38de612df74c01302d562b691b86501e5495eab6d44b18c6a
+runner tig
+actor cli
+at 2026-11-04T16:04:27.9107779Z

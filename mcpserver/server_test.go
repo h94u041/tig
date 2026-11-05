@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -25,11 +26,11 @@ func write(t *testing.T, dir, rel, text string) {
 }
 
 // connect is an agent named name talking to the project's tig over MCP.
-func connect(t *testing.T, r *tig.Repo, name string, allowRun bool) *mcp.ClientSession {
+func connect(t *testing.T, r *tig.Repo, name string) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	st, ct := mcp.NewInMemoryTransports()
-	ss, err := New(r, Options{Version: "test", AllowRun: allowRun}).Connect(ctx, st, nil)
+	ss, err := New(r, Options{Version: "test"}).Connect(ctx, st, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,23 +97,21 @@ func TestTools(t *testing.T) {
 	if err := r.Init(tig.Config{Root: "README.md"}); err != nil {
 		t.Fatal(err)
 	}
-	cs := connect(t, r, "agent-a", false)
+	cs := connect(t, r, "agent-a")
 
 	tools, err := cs.ListTools(context.Background(), nil)
-	if err != nil || len(tools.Tools) != 11 {
+	if err != nil || len(tools.Tools) != 17 {
 		t.Fatalf("tools: %v %v", tools, err)
 	}
-	// Closed: every design has an acceptance. Nothing passed yet, so the
-	// blocks are directions, not guidelines.
 	o := call[overviewOut](t, cs, "overview", nil)
-	if !o.Closed || strings.Join(o.Docs, ",") != "README.md,docs/pricing.md" || o.Directions != 3 || o.Guidelines != 0 || o.InProgress != nil {
+	if !o.Closed || strings.Join(o.Docs, ",") != "README.md,docs/pricing.md" || o.InProgress != nil {
 		t.Fatalf("overview: %+v", o)
 	}
 	cart := outlined(t, o, "README.md", "Cart")
 	shopRoot, pricingRoot := o.Outline[0].Block, outlined(t, o, "docs/pricing.md", "")
 
 	b := call[blockOut](t, cs, "read_block", map[string]any{"block": cart[:8]})
-	if b.Title != "Cart" || b.Status != tig.StatusDirection || b.AcceptedBy == "" || !slices.Contains(b.Files, "src/cart.js") || len(b.Children) != 1 {
+	if b.Title != "Cart" || !slices.Contains(b.Files, "src/cart.js") || len(b.Children) != 1 {
 		t.Fatalf("read_block: %+v", b)
 	}
 	down := call[followOut](t, cs, "follow", map[string]any{"block": shopRoot, "depth": 3})
@@ -127,21 +126,14 @@ func TestTools(t *testing.T) {
 		t.Fatalf("search: %+v", s)
 	}
 
-	// Without -run, the server never runs anything.
-	cartAcc := b.Children[0].Block
-	if msg := fails(t, cs, "check", map[string]any{"run": cartAcc}); !strings.Contains(msg, "-run") {
-		t.Fatal(msg)
-	}
-
 	w := call[tig.OpenWork](t, cs, "start_work", map[string]any{"basis": []string{cart[:10]}, "intent": "cart totals"})
 	if w.Actor != "agent-a" || w.Basis[0] != cart {
 		t.Fatalf("start_work: %+v", w)
 	}
 	write(t, root, "src/cart.js", "add()\ntotal()\n")
 	edit := call[tig.Step](t, cs, "record_step", map[string]any{"kind": "edit", "note": "totals"})
-	c := call[checkOut](t, cs, "check", nil)
-	for _, acc := range c.Acceptance {
-		call[tig.Step](t, cs, "record_step", map[string]any{"kind": "check", "basis": []string{acc.Block}, "command": acc.Commands[0].Command, "exit": 0, "output": "ok"})
+	for _, command := range []string{"echo cart-ok", "echo pricing-ok"} {
+		call[tig.Step](t, cs, "record_step", map[string]any{"kind": "check", "command": command, "exit": 0, "output": "ok"})
 	}
 	fails(t, cs, "record_step", map[string]any{"kind": "guess"})
 	done := call[tig.Work](t, cs, "finish_work", nil)
@@ -177,7 +169,7 @@ func TestTools(t *testing.T) {
 		fails(t, cs, "read_file", map[string]any{"path": p})
 	}
 
-	if c := call[checkOut](t, cs, "check", nil); !c.Closed || c.Guidelines != 3 || c.Directions != 0 {
+	if c := call[checkOut](t, cs, "check", nil); !c.Closed {
 		t.Fatalf("closed: %+v", c.Report)
 	}
 
@@ -198,6 +190,28 @@ func TestTools(t *testing.T) {
 	if _, err := cs.ReadResource(ctx, &mcp.ReadResourceParams{URI: "tig://object/../../config"}); err == nil {
 		t.Fatal("not an object")
 	}
+
+	// An agent's sentence the main document does not say is only a guess.
+	m := call[tig.Mark](t, cs, "mark_sentence", map[string]any{"sentence": "Totals include tax.", "commits": []string{done.ID[:4]}})
+	if m.Path != "inferred.md" {
+		t.Fatalf("a guess: %+v", m)
+	}
+	said := call[tig.Mark](t, cs, "mark_sentence", map[string]any{"sentence": "The cart adds items.", "commits": []string{done.ID[:4]}})
+	if said.Path != "README.md" {
+		t.Fatalf("what the document says: %+v", said)
+	}
+	if v := call[tig.RefView](t, cs, "resolve", map[string]any{"ref": "l" + said.Hash[:6]}); v.Line == nil || !strings.HasPrefix(v.Line.Text, "The cart adds items.") || len(v.Line.Intents) != 1 {
+		t.Fatalf("resolve a line: %+v", v)
+	}
+	if v := call[tig.RefView](t, cs, "resolve", map[string]any{"ref": done.ID[:4]}); v.Work == nil || len(v.Work.Intents) != 2 || v.Work.Acceptance != tig.WorkCandidate {
+		t.Fatalf("resolve a work: %+v", v)
+	}
+	data, _ := os.ReadFile(filepath.Join(root, "README.md"))
+	write(t, root, "README.md", strings.Replace(string(data), "The cart adds items.", "The cart adds and removes items.", 1))
+	if res := call[tig.SyncResult](t, cs, "sync_lines", nil); len(res.Touched) != 1 {
+		t.Fatalf("sync_lines: %+v", res)
+	}
+	fails(t, cs, "resolve", map[string]any{"ref": "nonsense"})
 }
 
 const greeter = "# Greeter\n\nA program that greets. Its module is [go.mod](go.mod) and its check is [check](check/main.go).\n\n" +
@@ -220,6 +234,12 @@ func main() {
 }
 `
 
+func goRun(dir string) ([]byte, error) {
+	cmd := exec.Command("go", "run", "./check")
+	cmd.Dir = dir
+	return cmd.CombinedOutput()
+}
+
 // TestRebuild is the point of tig: one agent builds what the documents
 // design, and another agent, given only the documents and the footprint,
 // builds it again by following the footprint, and knows when it is done.
@@ -232,22 +252,21 @@ func TestRebuild(t *testing.T) {
 	write(t, a, "go.mod", "module greeter\n\ngo 1.22\n")
 	write(t, a, "check/main.go", checkProgram)
 	ra := tig.Open(a)
-	if err := ra.Init(tig.Config{Root: "README.md", Verify: tig.VerifyStrict}); err != nil {
+	if err := ra.Init(tig.Config{Root: "README.md"}); err != nil {
 		t.Fatal(err)
 	}
 
 	// Agent A builds it.
-	ca := connect(t, ra, "agent-a", true)
+	ca := connect(t, ra, "agent-a")
 	o := call[overviewOut](t, ca, "overview", nil)
 	greeting := outlined(t, o, "README.md", "Greeting")
-	acc := call[blockOut](t, ca, "read_block", map[string]any{"block": greeting}).Children[0].Block
 	call[tig.OpenWork](t, ca, "start_work", map[string]any{"basis": []string{greeting}, "intent": "write hello.txt"})
 	write(t, a, "hello.txt", "hello, world\n")
 	call[tig.Step](t, ca, "record_step", map[string]any{"kind": "edit", "note": "hello.txt says hello"})
-	ran := call[checkOut](t, ca, "check", map[string]any{"run": acc})
-	if len(ran.Ran) != 1 || !ran.Ran[0].Passed() || !ran.Closed {
-		t.Fatalf("agent A's check: %+v", ran)
+	if out, err := goRun(a); err != nil {
+		t.Fatalf("agent A's check: %v\n%s", err, out)
 	}
+	call[tig.Step](t, ca, "record_step", map[string]any{"kind": "check", "command": "go run ./check", "exit": 0})
 	call[tig.Work](t, ca, "finish_work", nil)
 
 	// Agent B gets the documents, the check and the footprint; not the file.
@@ -263,7 +282,7 @@ func TestRebuild(t *testing.T) {
 		return nil
 	})
 	rb := tig.Open(b)
-	cb := connect(t, rb, "agent-b", true)
+	cb := connect(t, rb, "agent-b")
 	c := call[checkOut](t, cb, "check", nil)
 	if c.Closed || len(c.Stale) != 1 || c.Stale[0].Path != "hello.txt" || !strings.Contains(c.Stale[0].Message, "gone") {
 		t.Fatalf("agent B sees what is missing: %+v", c.Report)
@@ -280,9 +299,10 @@ func TestRebuild(t *testing.T) {
 		}
 	}
 	call[tig.Step](t, cb, "record_step", map[string]any{"kind": "edit", "note": "followed agent A's footprint"})
-	if ran := call[checkOut](t, cb, "check", map[string]any{"run": acc}); len(ran.Ran) != 1 || !ran.Ran[0].Passed() {
-		t.Fatalf("agent B's check: %+v", ran)
+	if out, err := goRun(b); err != nil {
+		t.Fatalf("agent B's check: %v\n%s", err, out)
 	}
+	call[tig.Step](t, cb, "record_step", map[string]any{"kind": "check", "command": "go run ./check", "exit": 0})
 	w := call[tig.Work](t, cb, "finish_work", nil)
 	if w.Result != tig.ResultPassed || w.Actor != "agent-b" {
 		t.Fatalf("agent B's work: %+v", w)

@@ -18,7 +18,7 @@ Putting files back from a snapshot refuses any path that could land outside the 
 
 ## Works and steps
 
-A work is one construction: the text blocks it is for, what it was meant to do, the snapshots before and after it, its steps in order, and its result. A step is one thing done in it:
+A work is tig's commit, not Git's: one intent carried out, which may have many sides. It records the text blocks it is for, what it was meant to do, the snapshots before and after it, its steps in order, and its result. A step is one thing done in it:
 
 | Kind | What tig records |
 |---|---|
@@ -28,12 +28,33 @@ A work is one construction: the text blocks it is for, what it was meant to do, 
 | `decision` | a question and its answer |
 | `note` | anything else |
 
-The work in progress lives in `.tig/WORK`, which stays on the machine. Finishing it writes the steps, then the work, and moves the `WORKS` head. Without a result given, the result comes from the checks: `passed` when every command's last check passed, `failed` when one did not, `done` when there was no check. Code: [work.go](../work.go).
+The work in progress lives in `.tig/WORK`, which stays on the machine. Agents working at the same time each take a session of their own (`-session`, or `session` over MCP), kept in `.tig/cache/`, so none holds up another; for the steps of each to record only its own changes they keep to their own files or their own copy of the project. Finishing it writes the steps, then the work, and moves the `WORKS` head. Without a result given, the result comes from the checks: `passed` when every command's last check passed, `failed` when one did not, `done` when there was no check. Code: [work.go](../work.go).
 
 Several processes can use one `.tig` at once: the heads move under a lock file, and so does the work in progress, so no record is lost. Code: [lock.go](../lock.go).
 
+## Commits
+
+Documents name commits by **short IDs**: at least 4 characters of the hash. Commits take them in the order of the chain: the first with a prefix keeps it, and a later one that would collide lengthens its own. Anyone with the chain works out the same IDs, and a new commit never changes an older one's.
+
+A commit can **fold** others under it, when a line has gathered too many. Folding only collapses: the parent records its children and holds no changes of its own, a line then shows the parent, and the children keep their records and their IDs. A commit's files are its children's, all the way down.
+
+When a work is undone, its links are withdrawn in the ledger (`Repo.Unmark`). The line and its mark stay: the design stays, the code is gone.
+
+A sentence can be written before there is any commit for it (`AddSentence`): design, not built yet. Marking it later binds it.
+
+A project that joins tig with code already in it can have one **baseline** commit: everything the project was until then, as one step from nothing. Design written later about that code names it. Code: [commits.go](../commits.go).
+
+## Relations
+
+Sentences, commits and files are many-to-many, and whoever works on the project needs only a part of that. A **set** starts from sentences, commits or files and follows the relations one step: from a sentence to its commits and their files, from a commit to its sentences and files, from a file to the commits that changed it and their sentences. It stops there, so one file everybody touches does not bring in the whole project. The baseline's files are not listed: they would be everything.
+
+A set can also start from intents, and each thing in it says why it is there: `seed`, `commit:<short>` or `file:<path>`. Rejected commits are in no set.
+
+**Groups** split the picture: sentences sharing a commit are one group, and so are the commits of one fold. Groups sharing at least two files, and at least half of the smaller one's, become one, not counting files many groups touch. The baseline joins nothing. Sentences on the baseline alone, and sentences with no commit yet, stay together by section. A group's key stays while it grows: its oldest commit. An undone commit (one named in another's `x-undoes`) is in no set and no group. Code: [relations.go](../relations.go).
+
 ## Acceptance
 
-The tests in [tig_test.go](../tig_test.go) and [work_test.go](../work_test.go):
+The tests in [tig_test.go](../tig_test.go), [work_test.go](../work_test.go), [marks_test.go](../marks_test.go) and [relations_test.go](../relations_test.go):
 
-- `go test -run "Snapshot|Objects|Restore|Trees|Records|Executable|Work" .`
+- `go test -run "Relations|Set|Groups" .`
+- `go test -run "Snapshot|Objects|Restore|Trees|Records|Executable|Work|ShortIDs|Fold|Baseline|Sessions" .`

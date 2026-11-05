@@ -1,7 +1,7 @@
 // Package mcpserver serves a project's tig as an MCP server. Any agent that
 // speaks MCP can read the project's documents as one chain, follow it down to
 // the files built for it, see the footprint of how it was built, check
-// whether the chain is closed, and leave its own footprint while it works.
+// whether the chain is closed, ask what any reference means, and leave its own footprint while it works.
 package mcpserver
 
 import (
@@ -22,26 +22,28 @@ import (
 // Options are how the server behaves.
 type Options struct {
 	Version string
-	// AllowRun lets check run an acceptance section's commands. Off, an
-	// agent cannot make tig run anything: a document it has just edited could
-	// say anything.
-	AllowRun bool
 }
 
 // New is an MCP server over the project's tig.
 func New(r *tig.Repo, opts Options) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "tig", Version: opts.Version}, &mcp.ServerOptions{Instructions: instructions})
-	h := handlers{r: r, allowRun: opts.AllowRun}
-	mcp.AddTool(s, &mcp.Tool{Name: "overview", Description: "Start here. The project's main document as an outline of text blocks (hash, title, status), whether the chain of documents is closed, how many blocks are guidelines (built and accepted) or directions (designed, not accepted yet), and any work in progress."}, h.overview)
+	h := handlers{r: r}
+	mcp.AddTool(s, &mcp.Tool{Name: "overview", Description: "Start here. The project's main document as an outline of text blocks (hash, title), whether the chain of documents is closed, and any work in progress."}, h.overview)
 	mcp.AddTool(s, &mcp.Tool{Name: "search", Description: "Find text blocks, works, steps and files containing every word of a query. Keyword search only: no hit does not mean the project has nothing on it under other words."}, h.search)
-	mcp.AddTool(s, &mcp.Tool{Name: "read_block", Description: "Read one text block: its text, where it sits, its status and acceptance, the detail documents it hands on to, the files linked or built for it, what it was before it changed, and the latest works done for it."}, h.readBlock)
+	mcp.AddTool(s, &mcp.Tool{Name: "read_block", Description: "Read one text block: its text, where it sits, the detail documents it hands on to, the files linked or built for it, what it was before it changed, and the latest works done for it."}, h.readBlock)
 	mcp.AddTool(s, &mcp.Tool{Name: "follow", Description: "Walk the chain from a block: down (its sections, the detail documents it hands on to, the files linked or built for it) or up (the sections and documents above it)."}, h.follow)
 	mcp.AddTool(s, &mcp.Tool{Name: "trail", Description: "The footprint: the works done for a block (and everything under it and its detail documents) or for a file, newest first. With steps, each work's steps and the files each step changed, so you can follow how it was built."}, h.trail)
 	mcp.AddTool(s, &mcp.Tool{Name: "read_file", Description: "Read a project file as it is now, or as it was in a tree from the footprint (a step's after tree, a snapshot's tree)."}, h.readFile)
-	mcp.AddTool(s, &mcp.Tool{Name: "check", Description: "Check whether the chain is closed: broken links and orphan documents, design no acceptance covers, stale links between design and code, files no design reaches, and how each acceptance last went. Give run to have tig itself run one acceptance section's commands (only the commands written in the documents run, and only when the server allows it)."}, h.check)
+	mcp.AddTool(s, &mcp.Tool{Name: "check", Description: "Check whether the chain is closed: broken links and orphan documents, stale links between design and code, lines edited since the last sync, intents nobody has confirmed since they changed, and files no design reaches. It reports facts and judges nothing."}, h.check)
 	mcp.AddTool(s, &mcp.Tool{Name: "start_work", Description: "Start a work (one construction) before changing the project: say which text blocks it is for and what it is meant to do. tig takes a snapshot. One work at a time."}, h.startWork)
 	mcp.AddTool(s, &mcp.Tool{Name: "record_step", Description: "Record one step of the work in progress: edit (tig records the files the step changed), command, install, check (a command you ran to check the design, with its exit code and output), decision (a question and its answer) or note."}, h.recordStep)
 	mcp.AddTool(s, &mcp.Tool{Name: "finish_work", Description: "Finish the work in progress. tig takes a snapshot and writes the work with its steps. Without a result, it comes from the checks: passed, failed, or done when there was none."}, h.finishWork)
+	mcp.AddTool(s, &mcp.Tool{Name: "read_commit", Description: "One commit by its short ID (the 4 characters resolve and relation_set show): its intent, the files it changed, the sentences that name it, and the commits it folds. Folded commits are still there: read them the same way."}, h.readCommit)
+	mcp.AddTool(s, &mcp.Tool{Name: "relation_set", Description: "What a piece of work needs, and no more: give intents, sentences, commits or files, and get the sentences, commits and files they relate to, one step away, each saying why it is there. Intents still find their line after its words change. Read this instead of the whole project before working on something. The baseline's files are not listed: they would be everything."}, h.relationSet)
+	mcp.AddTool(s, &mcp.Tool{Name: "mark_sentence", Description: "Bind a sentence to the commits that made it true. If the main document has the sentence, its line is marked and your commits follow it; a part of a line gets that range, and a piece of text may belong to many intents. If it does not, the sentence is your guess: it goes into the inferred document until a person agrees with it. A sentence may have many commits and a commit many sentences. Do this when you finish a work: the sentence says the intent, in words the next reader will look for."}, h.markSentence)
+	mcp.AddTool(s, &mcp.Tool{Name: "fold_commits", Description: "Fold commits under a new parent commit when a sentence has gathered too many: lines then show the parent. Nothing disappears: the children keep their records and their IDs."}, h.foldCommits)
+	mcp.AddTool(s, &mcp.Tool{Name: "resolve", Description: "What a reference means. i7f3a is an intent as it stands, i7f3a#2 a fixed revision of it, lc3d4e5:5-14 a range of a line, a1b2 a work, ev91c0 an event. You get the state, the text, where it is, the works on it with whether each was accepted, the revision before it, and whether the documents still agree."}, h.resolveRef)
+	mcp.AddTool(s, &mcp.Tool{Name: "sync_lines", Description: "Bring the ledger up to the documents after lines were edited: they get their new hash, intents an edit reached are asked about again, and intents it did not reach just move. Marks in the old format are converted."}, h.syncLines)
 	mcp.AddTool(s, &mcp.Tool{Name: "propose_link", Description: "Propose that a text block belongs with a file or another block. It is recorded as inferred, not observed."}, h.proposeLink)
 	for _, kind := range []string{"block", "work", "step", "object"} {
 		s.AddResourceTemplate(&mcp.ResourceTemplate{Name: kind, URITemplate: "tig://" + kind + "/{hash}", MIMEType: mimeOf(kind),
@@ -50,11 +52,13 @@ func New(r *tig.Repo, opts Options) *mcp.Server {
 	return s
 }
 
-const instructions = `This server is a project's tig: its documents as one chain (the main document, the detail documents it links to, their text blocks) and the footprint of how the project was built (works and their steps).
+const instructions = `This server is a project's tig: its documents as one chain (the main document, the detail documents it links to, their text blocks) and the footprint of how the project was built (commits, called works, and their steps). A line of a document ends in a mark, <tig l="c3d4e5"/>, and the ledger says what it means: intents over ranges of it, which may overlap, and the commits that follow each. Leave the marks where they are when you edit a line.
 
-Before changing the project: overview, then read_block and follow the blocks your change is about, and trail them to see how they were built. Then start_work with those blocks as the basis, record_step as you go (edit after you change files, check after you run an acceptance), and finish_work. Run check to see whether the chain is still closed.
+Before changing the project: overview, then read_block and follow the blocks your change is about, and trail them to see how they were built. Then start_work with those blocks as the basis, record_step as you go (edit after you change files, check after you run a check), and finish_work. Then bind what you did to the design with mark_sentence. Run check to see whether the chain is still closed: it also says where a sentence or its code has moved without the other. A sentence you add that the main document does not say goes into the inferred document, and only a person confirms it: never write your guess as if it had been agreed. Whether your work is accepted is decided by whoever takes it.
 
-Every block is named by its content hash; any unique prefix of 8 or more characters works. A block that changes gets a new hash; read_block shows what it was before.`
+Agents working at the same time each pass their own session to start_work, record_step and finish_work, and keep to their own files or their own copy of the project.
+
+Every block is named by its content hash; any unique prefix of 8 or more characters works. Anything else goes by a reference: ask resolve. A block that changes gets a new hash; read_block shows what it was before.`
 
 func mimeOf(kind string) string {
 	if kind == "block" {
@@ -67,8 +71,7 @@ func mimeOf(kind string) string {
 }
 
 type handlers struct {
-	r        *tig.Repo
-	allowRun bool
+	r *tig.Repo
 }
 
 func (h handlers) analyze(ctx context.Context) (*tig.Analysis, error) { return h.r.Analyze(ctx, "") }
@@ -107,21 +110,16 @@ type overviewIn struct {
 }
 
 type outlineItem struct {
-	Block  string `json:"block"`
-	Path   string `json:"path"`
-	Level  int    `json:"level"`
-	Title  string `json:"title"`
-	Status string `json:"status,omitempty"`
+	Block string `json:"block"`
+	Path  string `json:"path"`
+	Level int    `json:"level"`
+	Title string `json:"title"`
 }
 
 type overviewOut struct {
 	Root       string        `json:"root"`
 	Closed     bool          `json:"closed"`
-	Verify     string        `json:"verify"`
 	Docs       []string      `json:"docs"`
-	Guidelines int           `json:"guidelines"`
-	Directions int           `json:"directions"`
-	Open       int           `json:"open"`
 	Broken     int           `json:"broken"`
 	Stale      int           `json:"stale"`
 	Undesigned int           `json:"undesigned"`
@@ -137,8 +135,7 @@ func (h handlers) overview(ctx context.Context, _ *mcp.CallToolRequest, in overv
 		return nil, overviewOut{}, err
 	}
 	rep := a.Report
-	out := overviewOut{Root: rep.Root, Closed: rep.Closed, Verify: rep.Verify, Docs: a.Chain.Docs, Guidelines: rep.Guidelines,
-		Directions: rep.Directions, Open: len(rep.Open), Broken: len(rep.Broken), Stale: len(rep.Stale), Undesigned: len(rep.Undesigned)}
+	out := overviewOut{Root: rep.Root, Closed: rep.Closed, Docs: a.Chain.Docs, Broken: len(rep.Broken), Stale: len(rep.Stale), Undesigned: len(rep.Undesigned)}
 	for _, w := range a.Works() {
 		if w.ID != "" {
 			out.Works++
@@ -148,7 +145,7 @@ func (h handlers) overview(ctx context.Context, _ *mcp.CallToolRequest, in overv
 	from, to, next := page(len(a.Chain.Order), in.Cursor, in.Limit, 200)
 	for _, hash := range a.Chain.Order[from:to] {
 		b := a.Chain.Blocks[hash]
-		out.Outline = append(out.Outline, outlineItem{Block: hash, Path: b.Path, Level: b.Level, Title: b.Title, Status: a.Status[hash]})
+		out.Outline = append(out.Outline, outlineItem{Block: hash, Path: b.Path, Level: b.Level, Title: b.Title})
 	}
 	out.Next = next
 	return nil, out, nil
@@ -198,17 +195,14 @@ type workSummary struct {
 
 type blockOut struct {
 	tig.Block
-	Status     string          `json:"status,omitempty"`
-	AcceptedBy string          `json:"acceptedBy,omitempty"`
-	Above      string          `json:"parentTitle,omitempty"`
-	Children   []ref           `json:"children,omitempty"`
-	Details    []ref           `json:"details,omitempty"`
-	Files      []string        `json:"files,omitempty"`
-	Built      []string        `json:"built,omitempty"`
-	Before     []string        `json:"before,omitempty"`
-	Stale      []tig.Finding   `json:"stale,omitempty"`
-	Acceptance *tig.Acceptance `json:"acceptance,omitempty"`
-	Works      []workSummary   `json:"works,omitempty"`
+	Above    string        `json:"parentTitle,omitempty"`
+	Children []ref         `json:"children,omitempty"`
+	Details  []ref         `json:"details,omitempty"`
+	Files    []string      `json:"files,omitempty"`
+	Built    []string      `json:"built,omitempty"`
+	Before   []string      `json:"before,omitempty"`
+	Stale    []tig.Finding `json:"stale,omitempty"`
+	Works    []workSummary `json:"works,omitempty"`
 }
 
 func summary(w tig.Work) workSummary {
@@ -225,7 +219,7 @@ func (h handlers) readBlock(ctx context.Context, _ *mcp.CallToolRequest, in bloc
 	if err != nil {
 		return nil, blockOut{}, err
 	}
-	out := blockOut{Block: *b, Status: a.Status[b.Hash], AcceptedBy: a.Cover[b.Hash], Files: c.Refs[b.Hash], Built: a.Built[b.Hash]}
+	out := blockOut{Block: *b, Files: c.Refs[b.Hash], Built: a.Built[b.Hash]}
 	if p := c.Blocks[b.Parent]; p != nil {
 		out.Above = p.Title
 	}
@@ -243,11 +237,6 @@ func (h handlers) readBlock(ctx context.Context, _ *mcp.CallToolRequest, in bloc
 	for _, f := range a.Report.Stale {
 		if f.Block == b.Hash {
 			out.Stale = append(out.Stale, f)
-		}
-	}
-	for i := range a.Report.Acceptance {
-		if a.Report.Acceptance[i].Block == b.Hash {
-			out.Acceptance = &a.Report.Acceptance[i]
 		}
 	}
 	for i, w := range a.Trail(b.Hash) {
@@ -484,28 +473,16 @@ func (h handlers) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readF
 }
 
 type checkIn struct {
-	Run   string `json:"run,omitempty" jsonschema:"an acceptance block to run first: tig runs its commands itself"`
-	Limit int    `json:"limit,omitempty" jsonschema:"how many files without design to list (default 100)"`
+	Limit int `json:"limit,omitempty" jsonschema:"how many files without design to list (default 100)"`
 }
 
 type checkOut struct {
 	tig.Report
-	UndesignedCount int        `json:"undesignedCount"`
-	Ran             []tig.Step `json:"ran,omitempty"`
+	UndesignedCount int `json:"undesignedCount"`
 }
 
-func (h handlers) check(ctx context.Context, req *mcp.CallToolRequest, in checkIn) (*mcp.CallToolResult, checkOut, error) {
+func (h handlers) check(ctx context.Context, _ *mcp.CallToolRequest, in checkIn) (*mcp.CallToolResult, checkOut, error) {
 	var out checkOut
-	if in.Run != "" {
-		if !h.allowRun {
-			return nil, out, errors.New("running acceptance is off on this server (start it with -run); run the commands yourself and record them as check steps")
-		}
-		steps, err := h.r.RunAcceptance(ctx, in.Run, actor(req, ""), 0)
-		if err != nil {
-			return nil, out, err
-		}
-		out.Ran = steps
-	}
 	a, err := h.analyze(ctx)
 	if err != nil {
 		return nil, out, err
@@ -523,9 +500,17 @@ func (h handlers) check(ctx context.Context, req *mcp.CallToolRequest, in checkI
 }
 
 type startIn struct {
-	Basis  []string `json:"basis" jsonschema:"the text blocks this work is for (hashes or prefixes)"`
-	Intent string   `json:"intent" jsonschema:"what the work is meant to do, in one line"`
-	Actor  string   `json:"actor,omitempty" jsonschema:"who is working (default: this MCP client's name)"`
+	Basis   []string `json:"basis" jsonschema:"the text blocks this work is for (hashes or prefixes)"`
+	Intent  string   `json:"intent" jsonschema:"what the work is meant to do, in one line"`
+	Actor   string   `json:"actor,omitempty" jsonschema:"who is working (default: this MCP client's name)"`
+	Session string   `json:"session,omitempty" jsonschema:"your own session, when other agents work at the same time"`
+}
+
+// at is the tig as a session sees it.
+func (h handlers) at(session string) *tig.Repo {
+	r := *h.r
+	r.Session = session
+	return &r
 }
 
 func (h handlers) resolve(ctx context.Context, refs []string) ([]string, error) {
@@ -552,7 +537,7 @@ func (h handlers) startWork(ctx context.Context, req *mcp.CallToolRequest, in st
 	if err != nil {
 		return nil, tig.OpenWork{}, err
 	}
-	w, err := h.r.StartWork(ctx, basis, in.Intent, actor(req, in.Actor))
+	w, err := h.at(in.Session).StartWork(ctx, basis, in.Intent, actor(req, in.Actor))
 	if err != nil {
 		return nil, tig.OpenWork{}, err
 	}
@@ -568,6 +553,7 @@ type stepIn struct {
 	Output  string   `json:"output,omitempty" jsonschema:"its output"`
 	Detail  string   `json:"detail,omitempty" jsonschema:"a decision's question and answer, or a longer note"`
 	Actor   string   `json:"actor,omitempty"`
+	Session string   `json:"session,omitempty" jsonschema:"the session you started the work in"`
 }
 
 var stepKinds = map[string]bool{tig.StepEdit: true, tig.StepCommand: true, tig.StepInstall: true, tig.StepCheck: true, tig.StepDecision: true, tig.StepNote: true}
@@ -581,7 +567,7 @@ func (h handlers) recordStep(ctx context.Context, req *mcp.CallToolRequest, in s
 		return nil, tig.Step{}, err
 	}
 	// A check reported by an agent never claims to be tig's own run.
-	s, err := h.r.RecordStep(ctx, tig.StepInput{Kind: in.Kind, Basis: basis, Note: in.Note, Command: in.Command, Exit: in.Exit,
+	s, err := h.at(in.Session).RecordStep(ctx, tig.StepInput{Kind: in.Kind, Basis: basis, Note: in.Note, Command: in.Command, Exit: in.Exit,
 		Output: in.Output, Detail: in.Detail, Actor: actor(req, in.Actor)})
 	return nil, s, err
 }
@@ -589,6 +575,7 @@ func (h handlers) recordStep(ctx context.Context, req *mcp.CallToolRequest, in s
 type finishIn struct {
 	Result    string   `json:"result,omitempty" jsonschema:"passed, failed, done, rolled-back or abandoned (default: from the checks)"`
 	Approvers []string `json:"approvers,omitempty" jsonschema:"who approved the work"`
+	Session   string   `json:"session,omitempty" jsonschema:"the session you started the work in"`
 }
 
 func (h handlers) finishWork(ctx context.Context, _ *mcp.CallToolRequest, in finishIn) (*mcp.CallToolResult, tig.Work, error) {
@@ -597,8 +584,79 @@ func (h handlers) finishWork(ctx context.Context, _ *mcp.CallToolRequest, in fin
 	default:
 		return nil, tig.Work{}, fmt.Errorf("unknown result %q", in.Result)
 	}
-	w, err := h.r.FinishWork(ctx, in.Result, in.Approvers)
+	w, err := h.at(in.Session).FinishWork(ctx, in.Result, in.Approvers)
 	return nil, w, err
+}
+
+type commitIn struct {
+	ID string `json:"id" jsonschema:"the commit: its short ID, its hash or a unique prefix"`
+}
+
+func (h handlers) readCommit(ctx context.Context, _ *mcp.CallToolRequest, in commitIn) (*mcp.CallToolResult, tig.CommitView, error) {
+	a, err := h.analyze(ctx)
+	if err != nil {
+		return nil, tig.CommitView{}, err
+	}
+	v, err := a.Commit(in.ID)
+	return nil, v, err
+}
+
+func (h handlers) relationSet(ctx context.Context, _ *mcp.CallToolRequest, in tig.SetInput) (*mcp.CallToolResult, tig.Set, error) {
+	a, err := h.analyze(ctx)
+	if err != nil {
+		return nil, tig.Set{}, err
+	}
+	return nil, a.Relations(ctx).Set(in), nil
+}
+
+type markIn struct {
+	Sentence string   `json:"sentence" jsonschema:"one line: the intent, in the document's own language, without the mark"`
+	Commits  []string `json:"commits" jsonschema:"the commits it binds to (short IDs, hashes or prefixes)"`
+	Doc      string   `json:"doc,omitempty" jsonschema:"the document (default: the main document)"`
+	Under    string   `json:"under,omitempty" jsonschema:"the title of the section a new sentence goes under"`
+}
+
+func (h handlers) markSentence(ctx context.Context, req *mcp.CallToolRequest, in markIn) (*mcp.CallToolResult, tig.Mark, error) {
+	m, err := h.r.Mark(ctx, tig.MarkInput{Path: in.Doc, Sentence: in.Sentence, Under: in.Under, IDs: in.Commits, Inferred: true, By: tig.ByAI, Via: tig.ViaBuilder, Actor: actor(req, "")})
+	return nil, m, err
+}
+
+type foldIn struct {
+	Commits []string `json:"commits" jsonschema:"at least two commits"`
+	Intent  string   `json:"intent" jsonschema:"what they are, together, in one line"`
+}
+
+type foldOut struct {
+	Short string `json:"short"`
+	ID    string `json:"id"`
+}
+
+func (h handlers) foldCommits(ctx context.Context, req *mcp.CallToolRequest, in foldIn) (*mcp.CallToolResult, foldOut, error) {
+	w, err := h.r.Fold(ctx, tig.FoldInput{Commits: in.Commits, Intent: in.Intent, Actor: actor(req, "")})
+	if err != nil {
+		return nil, foldOut{}, err
+	}
+	commits, err := h.r.Commits(ctx)
+	if err != nil {
+		return nil, foldOut{}, err
+	}
+	return nil, foldOut{Short: commits.Short(w.ID), ID: w.ID}, nil
+}
+
+type resolveIn struct {
+	Ref string `json:"ref" jsonschema:"a reference: i7f3a, i7f3a#2, lc3d4e5:5-14, a1b2 or ev91c0"`
+}
+
+func (h handlers) resolveRef(ctx context.Context, _ *mcp.CallToolRequest, in resolveIn) (*mcp.CallToolResult, tig.RefView, error) {
+	v, err := h.r.Show(ctx, in.Ref)
+	return nil, v, err
+}
+
+type syncIn struct{}
+
+func (h handlers) syncLines(ctx context.Context, req *mcp.CallToolRequest, _ syncIn) (*mcp.CallToolResult, tig.SyncResult, error) {
+	res, err := h.r.Sync(ctx, actor(req, ""))
+	return nil, res, err
 }
 
 type linkIn struct {

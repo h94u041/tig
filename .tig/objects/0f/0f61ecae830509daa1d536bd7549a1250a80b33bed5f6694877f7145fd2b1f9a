@@ -1,0 +1,409 @@
+package tig
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+)
+
+// A mark binds a sentence of a document to the commits that made it true. It
+// is written in the document, so anyone who opens the document sees it:
+//
+//	**The cube turns one layer at a time. *a1b2 c3d4***
+//
+// The bold text is the sentence; the italic words at its end are commits, by
+// their short IDs. The relation is many to many: a document has any number of
+// marked sentences, a sentence any number of commits, and a commit may serve
+// many sentences and hold many changes.
+//
+// A mark is not design. Writing one leaves the block's hash, and so its
+// lineage, as they were: the block's text holds the plain sentence.
+
+// Mark is one marked sentence.
+type Mark struct {
+	Path  string   `json:"path"`
+	Block string   `json:"block"`
+	Line  int      `json:"line"` // 1-based
+	Text  string   `json:"text"` // the sentence
+	IDs   []string `json:"ids"`  // commits, as written
+}
+
+var markPattern = regexp.MustCompile(`\*\*((?:[^*\n]|\*[^*\n])+?)[ \t]+\*([0-9a-f]{4,64}(?:[ \t]+[0-9a-f]{4,64})*)\*\*\*`)
+
+// maskCode blanks a line's inline code without moving anything in it, so a
+// mark quoted as code is not read as a mark.
+func maskCode(line string) string {
+	return codeSpan.ReplaceAllStringFunc(line, func(s string) string { return strings.Repeat(" ", len(s)) })
+}
+
+// stripMarks turns each mark in a line back into its plain sentence.
+func stripMarks(line string) string {
+	locs := markPattern.FindAllStringSubmatchIndex(maskCode(line), -1)
+	if locs == nil {
+		return line
+	}
+	var b strings.Builder
+	end := 0
+	for _, l := range locs {
+		b.WriteString(line[end:l[0]])
+		b.WriteString(line[l[2]:l[3]])
+		end = l[1]
+	}
+	b.WriteString(line[end:])
+	return b.String()
+}
+
+// marksIn lists the marks in a block's own lines; first is the 1-based line
+// number of the first of them.
+func marksIn(path string, lines []string, fenced []bool, first int) []Mark {
+	var out []Mark
+	for i, line := range lines {
+		if i < len(fenced) && fenced[i] {
+			continue
+		}
+		for _, l := range markPattern.FindAllStringSubmatchIndex(maskCode(line), -1) {
+			out = append(out, Mark{Path: path, Line: first + i, Text: line[l[2]:l[3]], IDs: strings.Fields(line[l[4]:l[5]])})
+		}
+	}
+	return out
+}
+
+// sentenceKey names a sentence: the same words in the same order, however
+// they were spaced or wrapped.
+func sentenceKey(text string) string { return HashOf([]byte(strings.Join(strings.Fields(text), " "))) }
+
+// MarkInput says which sentence to mark.
+type MarkInput struct {
+	// Path is the document; the main document when empty.
+	Path string
+	// Sentence is one line of text, without the mark. If the document has it,
+	// that is the one marked; otherwise it is added.
+	Sentence string
+	// Under is the title of the section a new sentence goes under; a section
+	// is added if the document has none by that title, and with no title the
+	// sentence goes at the end.
+	Under string
+	IDs   []string
+}
+
+func fencedLines(lines []string) []bool {
+	fenced := make([]bool, len(lines))
+	var fenceMark string
+	for i, line := range lines {
+		m := fenceLine.FindStringSubmatch(strings.TrimRight(line, "\r"))
+		switch {
+		case fenceMark != "":
+			fenced[i] = true
+			rest := ""
+			if m != nil {
+				rest = strings.TrimRight(line, "\r")[strings.Index(line, m[1])+len(m[1]):]
+			}
+			if m != nil && m[1][0] == fenceMark[0] && len(m[1]) >= len(fenceMark) && strings.TrimSpace(rest) == "" {
+				fenceMark = ""
+			}
+		case m != nil:
+			fenced[i], fenceMark = true, m[1]
+		}
+	}
+	return fenced
+}
+
+func formatMark(sentence string, ids []string) string {
+	return "**" + sentence + " *" + strings.Join(ids, " ") + "***"
+}
+
+// SetMark marks a sentence in a document and returns the document. Commits
+// the sentence already has stay; the others are added after them.
+func SetMark(path string, content []byte, in MarkInput) ([]byte, error) {
+	sentence := strings.TrimSpace(in.Sentence)
+	if sentence == "" || strings.ContainsAny(sentence, "\r\n") || strings.Contains(sentence, "**") {
+		return nil, fmt.Errorf("tig: a marked sentence is one line of text without **: %q", in.Sentence)
+	}
+	if len(in.IDs) == 0 {
+		return nil, errors.New("tig: a mark needs at least one commit")
+	}
+	eol := "\n"
+	if bytes.Contains(content, []byte("\r\n")) {
+		eol = "\r\n"
+	}
+	lines := strings.Split(string(content), "\n")
+	fenced := fencedLines(lines)
+	for i, line := range lines {
+		if fenced[i] {
+			continue
+		}
+		masked := maskCode(line)
+		for _, l := range markPattern.FindAllStringSubmatchIndex(masked, -1) {
+			if line[l[2]:l[3]] != sentence {
+				continue
+			}
+			ids := strings.Fields(line[l[4]:l[5]])
+			for _, id := range in.IDs {
+				if !slices.Contains(ids, id) {
+					ids = append(ids, id)
+				}
+			}
+			lines[i] = line[:l[0]] + formatMark(sentence, ids) + line[l[1]:]
+			return []byte(strings.Join(lines, "\n")), nil
+		}
+	}
+	for i, line := range lines {
+		if fenced[i] {
+			continue
+		}
+		masked := maskCode(line)
+		at := strings.Index(masked, sentence)
+		if at < 0 || insideMark(masked, at) {
+			continue
+		}
+		lines[i] = line[:at] + formatMark(sentence, in.IDs) + line[at+len(sentence):]
+		return []byte(strings.Join(lines, "\n")), nil
+	}
+	return addMarked(path, content, lines, eol, sentence, in), nil
+}
+
+func insideMark(masked string, at int) bool {
+	for _, l := range markPattern.FindAllStringIndex(masked, -1) {
+		if at >= l[0] && at < l[1] {
+			return true
+		}
+	}
+	return false
+}
+
+// addMarked adds a marked sentence to the document: at the end of its section
+// when it has one.
+// AddSentence writes a sentence with no commit yet: design, not built. A
+// sentence the document already has stays as it is. It goes under the section
+// titled under, made at the end when there is none.
+func AddSentence(path string, content []byte, sentence, under string) ([]byte, error) {
+	sentence = strings.TrimSpace(sentence)
+	if sentence == "" || strings.ContainsAny(sentence, "\r\n") || strings.Contains(sentence, "**") {
+		return nil, fmt.Errorf("tig: a sentence is one line of text without **: %q", sentence)
+	}
+	for _, b := range ParseBlocks(path, content) {
+		for _, s := range b.Sentences {
+			if sentenceKey(s.Text) == sentenceKey(sentence) {
+				return content, nil
+			}
+		}
+	}
+	eol := "\n"
+	if bytes.Contains(content, []byte("\r\n")) {
+		eol = "\r\n"
+	}
+	return insertLine(path, content, strings.Split(string(content), "\n"), eol, sentence, under), nil
+}
+
+func addMarked(path string, content []byte, lines []string, eol, sentence string, in MarkInput) []byte {
+	return insertLine(path, content, lines, eol, formatMark(sentence, in.IDs), in.Under)
+}
+
+func insertLine(path string, content []byte, lines []string, eol, text, under string) []byte {
+	if under != "" {
+		for _, b := range ParseBlocks(path, content) {
+			if b.Level == 0 || b.Title != under {
+				continue
+			}
+			at := min(b.OwnEnd, len(lines))
+			for at > b.Start && strings.TrimSpace(lines[at-1]) == "" {
+				at--
+			}
+			add := []string{"" + strings.TrimSuffix(eol, "\n"), text + strings.TrimSuffix(eol, "\n")}
+			if at == len(lines) {
+				add = append(add, "")
+			} else if strings.TrimSpace(lines[at]) != "" {
+				add = append(add, strings.TrimSuffix(eol, "\n"))
+			}
+			return []byte(strings.Join(slices.Insert(slices.Clone(lines), at, add...), "\n"))
+		}
+	}
+	out := strings.TrimRight(string(content), "\r\n \t")
+	if out != "" {
+		out += eol + eol
+	}
+	if under != "" {
+		out += "## " + under + eol + eol
+	}
+	return []byte(out + text + eol)
+}
+
+// FoldMarks replaces the given commits with parent wherever the document's
+// marks name them: the first one's place becomes parent, the rest are dropped.
+func FoldMarks(content []byte, parent string, children []string) []byte {
+	lines := strings.Split(string(content), "\n")
+	fenced := fencedLines(lines)
+	for i, line := range lines {
+		if fenced[i] {
+			continue
+		}
+		locs := markPattern.FindAllStringSubmatchIndex(maskCode(line), -1)
+		for j := len(locs) - 1; j >= 0; j-- {
+			l := locs[j]
+			ids := strings.Fields(line[l[4]:l[5]])
+			var out []string
+			folded := false
+			for _, id := range ids {
+				switch {
+				case !slices.Contains(children, id):
+					if !slices.Contains(out, id) {
+						out = append(out, id)
+					}
+				case !folded && !slices.Contains(out, parent):
+					folded = true
+					out = append(out, parent)
+				default:
+					folded = true
+				}
+			}
+			if folded {
+				line = line[:l[4]] + strings.Join(out, " ") + line[l[5]:]
+			}
+		}
+		lines[i] = line
+	}
+	return []byte(strings.Join(lines, "\n"))
+}
+
+// Mark marks a sentence in a document in the project with commits, which it
+// takes by their short IDs or any unique prefix, and returns what the
+// document says now. Several writers can do this at once: it holds the lock.
+func (r *Repo) Mark(ctx context.Context, in MarkInput) (Mark, error) {
+	commits, err := r.Commits(ctx)
+	if err != nil {
+		return Mark{}, err
+	}
+	short := make([]string, 0, len(in.IDs))
+	for _, ref := range in.IDs {
+		w, err := commits.Resolve(ref)
+		if err != nil {
+			return Mark{}, err
+		}
+		short = append(short, commits.Short(w.ID))
+	}
+	in.IDs = short
+	if in.Path == "" {
+		cfg, err := r.Config()
+		if err != nil {
+			return Mark{}, err
+		}
+		in.Path = cfg.Root
+	}
+	if !IsMarkdown(in.Path) {
+		return Mark{}, fmt.Errorf("tig: %s is not a Markdown document", in.Path)
+	}
+	full, err := r.safePath(in.Path)
+	if err != nil {
+		return Mark{}, err
+	}
+	if r.Dir != "" {
+		unlock, err := lockRepo(ctx, r.Dir)
+		if err != nil {
+			return Mark{}, err
+		}
+		defer unlock()
+	}
+	content, err := os.ReadFile(full)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Mark{}, err
+	}
+	out, err := SetMark(in.Path, content, in)
+	if err != nil {
+		return Mark{}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return Mark{}, err
+	}
+	if err := writeAtomic(full, out, 0o644); err != nil {
+		return Mark{}, err
+	}
+	sentence := strings.TrimSpace(in.Sentence)
+	for _, b := range ParseBlocks(in.Path, out) {
+		for _, m := range b.Marks {
+			if m.Text == sentence {
+				return m, nil
+			}
+		}
+	}
+	return Mark{}, fmt.Errorf("tig: the mark on %q did not read back", sentence)
+}
+
+// DropMarks takes the given short IDs out of every mark. A sentence left with
+// none goes back to being plain text: the design stays, the code is gone.
+func DropMarks(content []byte, ids []string) []byte {
+	lines := strings.Split(string(content), "\n")
+	fenced := fencedLines(lines)
+	for i, line := range lines {
+		if fenced[i] {
+			continue
+		}
+		locs := markPattern.FindAllStringSubmatchIndex(maskCode(line), -1)
+		for j := len(locs) - 1; j >= 0; j-- {
+			l := locs[j]
+			have := strings.Fields(line[l[4]:l[5]])
+			keep := slices.DeleteFunc(slices.Clone(have), func(id string) bool { return slices.Contains(ids, id) })
+			switch {
+			case len(keep) == len(have):
+			case len(keep) == 0:
+				line = line[:l[0]] + line[l[2]:l[3]] + line[l[1]:]
+			default:
+				line = line[:l[0]] + formatMark(line[l[2]:l[3]], keep) + line[l[1]:]
+			}
+		}
+		lines[i] = line
+	}
+	return []byte(strings.Join(lines, "\n"))
+}
+
+// Unmark takes commits out of the marks of every document of the chain, when
+// their work was undone. It returns the documents it changed.
+func (r *Repo) Unmark(ctx context.Context, refs []string) ([]string, error) {
+	if r.Dir == "" {
+		return nil, errors.New("tig: unmarking needs a .tig folder")
+	}
+	unlock, err := lockRepo(ctx, r.Dir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	commits, err := r.Commits(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var short []string
+	for _, ref := range refs {
+		w, err := commits.Resolve(ref)
+		if err != nil {
+			return nil, err
+		}
+		short = append(short, commits.Short(w.ID))
+	}
+	chain, err := r.Chain(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	var changed []string
+	for _, doc := range chain.Docs {
+		full, err := r.safePath(doc)
+		if err != nil {
+			return changed, err
+		}
+		content, err := os.ReadFile(full)
+		if err != nil {
+			return changed, err
+		}
+		if out := DropMarks(content, short); string(out) != string(content) {
+			if err := writeAtomic(full, out, 0o644); err != nil {
+				return changed, err
+			}
+			changed = append(changed, doc)
+		}
+	}
+	return changed, nil
+}

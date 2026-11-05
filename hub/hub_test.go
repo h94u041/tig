@@ -99,7 +99,7 @@ func TestPush(t *testing.T) {
 		return nil
 	})
 	design := v.Block(tig.ParseBlocks("docs/design.md", []byte("# Design\n\nHow it works. Code: [main.go](../main.go).\n\n## Acceptance\n\n- `go version`\n"))[1].Hash)
-	if design == nil || design.Status != tig.StatusDirection || len(design.Refs) != 1 || design.Refs[0] != "main.go" {
+	if design == nil || len(design.Refs) != 1 || design.Refs[0] != "main.go" {
 		t.Fatalf("the design block on the hub: %+v", design)
 	}
 
@@ -218,7 +218,7 @@ func TestPages(t *testing.T) {
 
 	for path, wants := range map[string][]string{
 		"/":                              {"alice/demo", `badge closed">closed`},
-		"/alice/demo":                    {"docs/design.md", "direction", "go version", "first"},
+		"/alice/demo":                    {"docs/design.md", "first"},
 		"/alice/demo/log":                {"first", "test"},
 		"/alice/demo/doc/README.md":      {`href="/alice/demo/doc/docs/design.md"`, "A demo."},
 		"/alice/demo/doc/docs/design.md": {"How it works", "links <code>main.go</code>"},

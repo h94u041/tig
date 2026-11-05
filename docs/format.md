@@ -10,15 +10,16 @@ Everything tig writes is plain text or a file's own bytes, named by its content,
   HEAD                the latest snapshot
   WORKS               the latest work
   LINKS               the latest proposed link
+  ledger/<hash>       the ledger: intents, lines, links, acceptances
   objects/ab/ab…      objects
   .gitignore          keeps the local files below out of Git
   .gitattributes      * -text: Git must not change the objects' line endings
   WORK                the work in progress (local)
-  cache/              file sizes and times (local)
+  cache/              file sizes and times, the other sessions' work in progress (local)
   lock, work.lock     (local)
 ```
 
-A head holds one hash. The config, the heads and the objects go into Git with the project, byte for byte: an object whose line endings Git changed would no longer match its name, and readers refuse it.
+A head holds one hash. The config, the heads, the objects and the ledger go into Git with the project, byte for byte: an object whose line endings Git changed would no longer match its name, and readers refuse it.
 
 ## Objects
 
@@ -30,14 +31,26 @@ A record is a header line naming its kind and version, then one `key value` line
 
 | Header | Fields |
 |---|---|
-| `tig-config 1` | `root` (the main document), `verify` (`loose` or `strict`), `outside` (repeated) |
+| `tig-config 1` | `root` (the main document), `inferred` (the inferred document), `outside` (repeated) |
 | `tig-snapshot 1` | `tree`, `parent` (repeated), `at`, `reason`, `actor`, `lineage` |
-| `tig-work 1` | `parent` (the work before), `basis` (repeated blocks), `intent`, `before` and `after` (snapshots), `step` (repeated, in order), `result`, `actor`, `approver` (repeated), `started`, `at` |
+| `tig-work 1` | `parent` (the work before), `basis` (repeated blocks), `intent`, `before` and `after` (snapshots), `step` (repeated, in order), `child` (repeated: the commits it folds), `result`, `actor`, `approver` (repeated), `started`, `at` |
 | `tig-step 1` | `kind`, `basis` (repeated blocks), `before` and `after` (trees), `command`, `exit`, `output` and `detail` (objects), `note`, `runner`, `actor`, `at` |
 | `tig-lineage 1` | `m` (`old new kind score`, repeated), `a` (added blocks), `r` (removed blocks) |
 | `tig-link 1` | `parent` (the link before), `from`, `to-block` or `to-file`, `to-hash` (the file when linked), `kind`, `note`, `actor`, `at` |
 
 Readers ignore keys they do not know. A later feature adds fields starting with `x-`, and readers keep them; a new version of a kind is only for a change older readers would misread.
+
+## The ledger
+
+Ledger records are named by their content like everything else, kept in `ledger/` and never changed. There is no head: a machine's ledger is the set of its files, so two ledgers merge by taking both, and a record that does not match its name is refused.
+
+| Header | Fields |
+|---|---|
+| `tig-intent-event 1` | `intent` (the first event's hash; none on the first), `parent` (the event before), `kind`, `revision`, `text`, `span` (`line n from to`, repeated), `from` (repeated: where it came from), `by`, `via`, `actor`, `reason`, `at` |
+| `tig-line-event 1` | `line` (the text's hash), `parent` (the line it was), `at` |
+| `tig-link-event 1` | `work`, `intent`, `revision`, `kind`, `actor`, `at` |
+| `tig-acceptance 1` | `work`, `state` (`accepted` or `rejected`), `by`, `via`, `actor`, `reason`, `at` |
+| `tig-ledger-start 1` | `at`: commits older than this count as accepted |
 
 ## Trees
 
@@ -62,6 +75,6 @@ where `path` is the document's path in the project with `/` between folders, `he
 
 ## Acceptance
 
-The tests of objects, and of reading older trees and unknown fields, in [tig_test.go](../tig_test.go):
+The tests of objects, and of reading older trees and unknown fields, in [tig_test.go](../tig_test.go), and of the ledger in [ledger_test.go](../ledger_test.go):
 
-- `go test -run "Objects|OldTrees" .`
+- `go test -run "Objects|OldTrees|Ledger" .`

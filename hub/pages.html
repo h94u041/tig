@@ -88,7 +88,6 @@ ul.findings li { margin: 3px 0; }
 {{define "top"}}<header class="top"><div class="in"><a class="brand" href="/">tig hub</a>
 {{if .}}<span class="crumbs">/ <a href="{{.Base}}">{{.Owner}}/{{.Name}}</a></span>{{end}}</div></header>{{end}}
 
-{{define "status"}}{{if .}}<span class="badge {{.}}">{{.}}</span>{{else}}<span class="badge none">no design</span>{{end}}{{end}}
 
 {{define "closed"}}{{if .}}<span class="badge closed">closed</span>{{else}}<span class="badge notclosed">not closed</span>{{end}}{{end}}
 
@@ -98,13 +97,12 @@ ul.findings li { margin: 3px 0; }
 <p class="sub">Each project's documents and chain, as its owner last pushed them. The code stays with the project.</p>
 <div class="panel scroll">
 {{if .}}<table>
-<tr><th>Project</th><th>Chain</th><th class="num">Docs</th><th class="num">Guidelines</th><th class="num">Directions</th><th>Pushed</th></tr>
+<tr><th>Project</th><th>Chain</th><th class="num">Docs</th><th class="num">Lines with work</th><th>Pushed</th></tr>
 {{range .}}<tr>
 <td><a href="/{{.Owner}}/{{.Name}}">{{.Owner}}/{{.Name}}</a></td>
 <td>{{template "closed" .Chain.Report.Closed}}</td>
 <td class="num">{{.Chain.Report.Docs}}</td>
-<td class="num">{{.Chain.Report.Guidelines}}</td>
-<td class="num">{{.Chain.Report.Directions}}</td>
+<td class="num">{{.Chain.Report.Marks}}</td>
 <td>{{when .Head.At}}</td>
 </tr>{{end}}
 </table>{{else}}<div class="empty">Nothing pushed yet. <code>tigprint push http://this-hub/owner/name</code></div>{{end}}
@@ -121,21 +119,18 @@ pushed {{when .Head.At}}{{if .Head.Actor}} by {{.Head.Actor}}{{end}}{{if .Head.N
 <div class="stats">
 <div class="panel stat"><b>{{.Chain.Report.Docs}}</b><span>documents</span></div>
 <div class="panel stat"><b>{{.Chain.Report.Blocks}}</b><span>blocks</span></div>
-<div class="panel stat"><b>{{.Chain.Report.Guidelines}}</b><span>guidelines</span></div>
-<div class="panel stat"><b>{{.Chain.Report.Directions}}</b><span>directions</span></div>
-<div class="panel stat"><b>{{.Chain.Report.Verify}}</b><span>verify</span></div>
+<div class="panel stat"><b>{{.Chain.Report.Marks}}</b><span>lines with work</span></div>
 </div>
 
 <h2 class="sec">Documents</h2>
 <div class="panel scroll"><table>
-<tr><th>Document</th><th class="num">Guidelines</th><th class="num">Directions</th><th class="num">Open</th></tr>
+<tr><th>Document</th><th class="num">Blocks</th></tr>
 {{range .Docs}}<tr><td><a href="{{docURL $.Base .Path}}">{{.Path}}</a></td>
-<td class="num">{{.Guidelines}}</td><td class="num">{{.Directions}}</td><td class="num">{{.Open}}</td></tr>{{end}}
+<td class="num">{{.Blocks}}</td></tr>{{end}}
 </table></div>
 
 {{with .Chain.Report}}
 {{if .Broken}}<h2 class="sec">Broken</h2><div class="panel"><ul class="findings">{{range .Broken}}<li><code>{{.Path}}</code>{{if .Line}}:{{.Line}}{{end}} {{.Message}}</li>{{end}}</ul></div>{{end}}
-{{if .Open}}<h2 class="sec">Open</h2><div class="panel"><ul class="findings">{{range .Open}}<li><a href="{{docURL $.Base .Path}}#b-{{short .Block}}"><code>{{.Path}}</code>{{if .Line}}:{{.Line}}{{end}}</a>{{if .Title}} ({{.Title}}){{end}}: {{.Message}}</li>{{end}}</ul></div>{{end}}
 {{if .Stale}}<h2 class="sec">Stale</h2><div class="panel"><ul class="findings">{{range .Stale}}<li><code>{{.Path}}</code>{{if .Title}} ({{.Title}}){{end}}: {{.Message}}</li>{{end}}</ul></div>{{end}}
 {{if .Undesigned}}<h2 class="sec">No design reaches</h2><div class="panel"><ul class="findings">{{range .Undesigned}}<li><code>{{.}}</code></li>{{end}}</ul></div>{{end}}
 {{end}}
@@ -143,34 +138,21 @@ pushed {{when .Head.At}}{{if .Head.Actor}} by {{.Head.Actor}}{{end}}{{if .Head.N
 <h2 class="sec">Outline</h2>
 <div class="panel outline">
 {{range .Chain.Blocks}}{{if eq .Level 0}}<a class="row docrow" href="{{docURL $.Base .Path}}"><span class="title">{{.Path}}</span></a>
-{{else}}<a class="row" href="{{docURL $.Base .Path}}#b-{{short .Hash}}"><span class="title" style="padding-left:{{indent .Level}}px">{{.Title}}</span>{{if .Status}}{{template "status" .Status}}{{end}}<span class="hash">{{short .Hash}}</span></a>
+{{else}}<a class="row" href="{{docURL $.Base .Path}}#b-{{short .Hash}}"><span class="title" style="padding-left:{{indent .Level}}px">{{.Title}}</span><span class="hash">{{short .Hash}}</span></a>
 {{end}}{{end}}
 </div>
 
-{{if .Chain.Report.Acceptance}}<h2 class="sec">Acceptance</h2>
-<div class="panel scroll"><table>
-<tr><th>Accepts</th><th>Command</th><th>Result</th><th>Last run</th></tr>
-{{range .Chain.Report.Acceptance}}{{$acc := .}}{{range .Commands}}<tr>
-<td><a href="{{docURL $.Base $acc.Path}}#b-{{short $acc.Block}}">{{$acc.Accepts}}</a></td>
-<td><code>{{.Command}}</code></td>
-<td><span class="badge {{if eq .Result "passed"}}guideline{{else if eq .Result "failed"}}open{{else}}none{{end}}">{{.Result}}</span></td>
-<td>{{when .At}}{{if .Runner}} by {{.Runner}}{{end}}</td>
-</tr>{{end}}{{end}}
-</table></div>{{end}}
 </main></body></html>{{end}}
 
 {{define "doc"}}{{template "head" .Doc}}{{template "top" .}}
 <main>
 <h1>{{.Doc}}</h1>
-<p class="sub">From the publication of {{when .Head.At}}. Statuses are the chain's; files linked from the text are named, not kept here.</p>
+<p class="sub">From the publication of {{when .Head.At}}. Files linked from the text are named, not kept here.</p>
 <div class="panel doc">
 {{range .Blocks}}<section class="block" id="{{.ID}}">
 <div class="prose">{{if .Anchor}}<a id="{{.Anchor}}"></a>{{end}}{{.HTML}}</div>
 <div class="meta">
-{{with .View}}{{if .Status}}<div>{{template "status" .Status}}</div>{{end}}
-{{if .Cover}}<div>accepted by <a href="#b-{{short .Cover}}">{{short .Cover}}</a></div>{{end}}
-{{if .Accept}}<div>{{len .Accept}} acceptance command{{if gt (len .Accept) 1}}s{{end}}</div>{{end}}
-{{range .Details}}<div>details: <a href="{{docURL $.Base .}}">{{.}}</a></div>{{end}}
+{{with .View}}{{range .Details}}<div>details: <a href="{{docURL $.Base .}}">{{.}}</a></div>{{end}}
 {{range .Refs}}<div>links <code>{{.}}</code></div>{{end}}
 {{range .Built}}<div>built <code>{{.}}</code></div>{{end}}{{end}}
 <div class="hash">{{short .Hash}}</div>
@@ -184,11 +166,11 @@ pushed {{when .Head.At}}{{if .Head.Actor}} by {{.Head.Actor}}{{end}}{{if .Head.N
 <h1>Publications</h1>
 <p class="sub">Every push of {{.Owner}}/{{.Name}}, newest first.</p>
 <div class="panel scroll"><table>
-<tr><th>Publication</th><th>Pushed</th><th>By</th><th>Chain</th><th class="num">Guidelines</th><th>Note</th></tr>
+<tr><th>Publication</th><th>Pushed</th><th>By</th><th>Chain</th><th class="num">Lines with work</th><th>Note</th></tr>
 {{range .Rows}}<tr>
 <td class="hash">{{short .ID}}</td><td>{{when .At}}</td><td>{{.Actor}}</td>
 <td>{{with .Chain}}{{template "closed" .Report.Closed}}{{end}}</td>
-<td class="num">{{with .Chain}}{{.Report.Guidelines}}{{end}}</td><td>{{.Note}}</td>
+<td class="num">{{with .Chain}}{{.Report.Marks}}{{end}}</td><td>{{.Note}}</td>
 </tr>{{end}}
 </table></div>
 </main></body></html>{{end}}

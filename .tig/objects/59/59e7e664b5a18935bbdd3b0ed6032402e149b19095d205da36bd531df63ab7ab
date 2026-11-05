@@ -1,0 +1,5 @@
+--- FAIL: TestTools (0.02s)
+    server_test.go:103: tools: &{{complete} map[io.modelcontextprotocol/serverInfo:map[name:tig version:test]] {0 public}  [0x3a370a28a200 0x3a370a28a300 0x3a370a28a380 0x3a370a28a400 0x3a370a28a480 0x3a370a28a500 0x3a370a28a580 0x3a370a28a600 0x3a370a28a680 0x3a370a28a800 0x3a370a28a900 0x3a370a28a980 0x3a370a28aa00 0x3a370a28aa80 0x3a370a28ab00]} <nil>
+FAIL
+FAIL	github.com/h94u041/tig/mcpserver	7.737s
+FAIL

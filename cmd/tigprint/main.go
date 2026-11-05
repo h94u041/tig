@@ -28,7 +28,7 @@ var version = "0.1.0"
 const usage = `tigprint keeps a project's tig: the footprint of how the project was built
 and the chain of its documents, checked and served to agents over MCP.
 
-Usage: tigprint [-C dir] [-actor name] <command> [arguments]
+Usage: tigprint [-C dir] [-actor name] [-session name] <command> [arguments]
 
 Project
   init [-root README.md] [-strict] [-outside path,...]  start a tig in this folder
@@ -39,10 +39,11 @@ Project
 
 Chain
   blocks <file.md>                                       a document's text blocks and their hashes
-  chain                                                  every block of the chain and its status
-  show <block>                                           one block: its text, status, details and what was built for it
+  chain                                                  every block of the chain
+  show <block|reference>                                 one block: its text, details and what was built for it; or
+                                                         what a reference means: i7f3a, i7f3a#2, lc3d4e5:5-14, a1b2, ev91c0
   search <words>                                         blocks, works, steps and files containing every word
-  check [-run block] [-run-all] [-json]                  is the chain closed? (exit status 1 when not)
+  check [-json]                                          is the chain closed? (exit status 1 when not)
 
 Footprint
   trail [-steps] [-n 20] <block|file>                    the works done for a block or a file
@@ -52,10 +53,27 @@ Footprint
                                                          install, check, decision, note)
   work finish [-result r] [-approver name,...]           finish it
   work status                                            the work in progress
+  commits [-n 20]                                        the commits, newest first, by short ID
+  commit <id>                                            one commit: its files, its sentences, what it folds
+  set [-json] [-s sentence] [-id a1b2] [-f file]...      what a piece of work needs: sentences, commits, files
+  groups [-json]                                         the sentences, commits and files that belong together
+
+Marks
+  mark [-id a1b2,c3d4] [-doc f.md] [-under title] [-inferred] [-confirm] <sentence>
+                                                         say what a line or a part of it means, and which commits
+                                                         follow it. -inferred: a guess, for the inferred document
+                                                         unless the main document says it already
+  sync                                                   bring the ledger up to edited lines; old marks are converted
+  confirm [-under title] [-m why] <intent>               it is what was meant; out of the inferred document if there
+  reject [-m why] <intent>                               it is not what was meant
+  retire [-by i1a2b] [-m why] <intent>                   it no longer stands, or another took its place
+  accept [-reject] [-m why] <id>                         record a decision on a commit; tig judges nothing
+  fold -m intent <id> <id>...                            fold commits under a new one; none disappear
+  unmark <id>...                                         withdraw undone commits from what they followed; the sentences stay
+  baseline -m intent                                     one commit for all the project was before tig
 
 Agents
-  mcp [-run]                                             serve this tig over MCP on stdin and stdout;
-                                                         -run lets agents have tig run acceptance commands
+  mcp                                                    serve this tig over MCP on stdin and stdout
 
 Hub
   push [-token t] [-m note] <url>                        send the documents and the chain to a hub
@@ -64,7 +82,8 @@ Hub
   version
 
 A block is named by its content hash; any unique prefix of 8 or more characters
-works. The actor is -actor, or $TIG_ACTOR, or "cli".
+works, and a commit by its short ID. The actor is -actor, or $TIG_ACTOR, or
+"cli". Agents working at once each use their own -session.
 `
 
 func main() {
@@ -74,12 +93,13 @@ func main() {
 }
 
 type cli struct {
-	ctx   context.Context
-	out   io.Writer
-	errs  io.Writer
-	dir   string // -C
-	actor string
-	r     *tig.Repo
+	ctx     context.Context
+	out     io.Writer
+	errs    io.Writer
+	dir     string // -C
+	actor   string
+	session string
+	r       *tig.Repo
 }
 
 // errNotClosed ends check with exit status 1 and nothing more to say.
@@ -91,6 +111,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	g.Usage = func() { fmt.Fprint(stderr, usage) }
 	dir := g.String("C", "", "the project folder")
 	actor := g.String("actor", "", "who is acting")
+	session := g.String("session", "", "keep this work in progress apart from other agents'")
 	if err := g.Parse(args); err != nil {
 		return 2
 	}
@@ -98,7 +119,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
-	c := &cli{ctx: ctx, out: stdout, errs: stderr, dir: *dir, actor: *actor}
+	c := &cli{ctx: ctx, out: stdout, errs: stderr, dir: *dir, actor: *actor, session: *session}
 	if c.actor == "" {
 		c.actor = os.Getenv("TIG_ACTOR")
 	}
@@ -109,6 +130,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		"init": c.init, "snap": c.snap, "log": c.log, "diff": c.diff, "restore": c.restore,
 		"blocks": c.blocks, "chain": c.chain, "show": c.show, "search": c.search, "check": c.check,
 		"trail": c.trail, "work": c.work, "mcp": c.mcp, "push": c.push,
+		"commits": c.commits, "commit": c.commit, "mark": c.mark, "fold": c.fold, "unmark": c.unmark, "baseline": c.baseline,
+		"sync": c.sync, "confirm": c.confirm, "reject": c.reject, "retire": c.retire, "accept": c.accept,
+		"set": c.set, "groups": c.groups,
 		"version": func([]string) error { fmt.Fprintf(c.out, "tigprint %s\n", version); return nil },
 	}
 	name := g.Arg(0)
@@ -153,6 +177,7 @@ func (c *cli) open() error {
 	for d := start; ; d = filepath.Dir(d) {
 		if fi, err := os.Stat(filepath.Join(d, ".tig")); err == nil && fi.IsDir() {
 			c.r = tig.Open(d)
+			c.r.Session = c.session
 			return nil
 		}
 		if filepath.Dir(d) == d {
@@ -178,7 +203,6 @@ func when(w interface{ IsZero() bool }, s string) string {
 func (c *cli) init(args []string) error {
 	fs := c.flags("init")
 	root := fs.String("root", "README.md", "the main document")
-	strict := fs.Bool("strict", false, "only checks tig runs itself count")
 	outside := fs.String("outside", "", "comma-separated path prefixes that are not part of the chain")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -190,9 +214,6 @@ func (c *cli) init(args []string) error {
 	r := tig.Open(dir)
 	existed := r.Exists()
 	cfg := tig.Config{Root: *root}
-	if *strict {
-		cfg.Verify = tig.VerifyStrict
-	}
 	for _, p := range strings.Split(*outside, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			cfg.Outside = append(cfg.Outside, p)
@@ -214,7 +235,7 @@ func (c *cli) init(args []string) error {
 	} else {
 		fmt.Fprintf(c.out, "tig started in %s\n", r.Dir)
 	}
-	fmt.Fprintf(c.out, "main document %s, verify %s, snapshot %s\n", cfg.Root, cfg.Verify, short(s.ID))
+	fmt.Fprintf(c.out, "main document %s, snapshot %s\n", cfg.Root, short(s.ID))
 	return nil
 }
 
@@ -422,18 +443,14 @@ func (c *cli) chain(args []string) error {
 	}
 	for _, h := range a.Chain.Order {
 		b := a.Chain.Blocks[h]
-		status := ""
-		if s := a.Status[h]; s != "" {
-			status = "  [" + s + "]"
-		}
-		fmt.Fprintf(c.out, "%s  %s%s%s\n", short(h), strings.Repeat("  ", max(b.Level-1, 0)), heading(b), status)
+		fmt.Fprintf(c.out, "%s  %s%s\n", short(h), strings.Repeat("  ", max(b.Level-1, 0)), heading(b))
 	}
 	return nil
 }
 
 func (c *cli) show(args []string) error {
 	if len(args) != 1 {
-		return errors.New("usage: tigprint show <block>")
+		return errors.New("usage: tigprint show <block|reference>")
 	}
 	a, err := c.analyze()
 	if err != nil {
@@ -442,16 +459,12 @@ func (c *cli) show(args []string) error {
 	ch := a.Chain
 	b, err := ch.Block(args[0])
 	if err != nil {
-		return err
+		if _, perr := tig.ParseRef(args[0]); perr != nil {
+			return err
+		}
+		return c.showRef(args[0])
 	}
 	fmt.Fprintf(c.out, "%s\n%s:%d-%d  %s\n", b.Hash, b.Path, b.Start, b.End, strings.Join(b.Heading, " > "))
-	if s := a.Status[b.Hash]; s != "" {
-		fmt.Fprintf(c.out, "status: %s", s)
-		if acc := ch.Blocks[a.Cover[b.Hash]]; acc != nil {
-			fmt.Fprintf(c.out, " (accepted by %s:%d)", acc.Path, acc.Start)
-		}
-		fmt.Fprintln(c.out)
-	}
 	if b.Text != "" {
 		fmt.Fprintf(c.out, "\n  %s\n\n", strings.ReplaceAll(b.Text, "\n", "\n  "))
 	}
@@ -509,8 +522,6 @@ func (c *cli) search(args []string) error {
 
 func (c *cli) check(args []string) error {
 	fs := c.flags("check")
-	runOne := fs.String("run", "", "an acceptance block to run first")
-	runAll := fs.Bool("run-all", false, "run every acceptance section first")
 	asJSON := fs.Bool("json", false, "print the report as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -518,27 +529,6 @@ func (c *cli) check(args []string) error {
 	a, err := c.analyze()
 	if err != nil {
 		return err
-	}
-	var blocks []string
-	if *runOne != "" {
-		b, err := a.Chain.Block(*runOne)
-		if err != nil {
-			return err
-		}
-		blocks = append(blocks, b.Hash)
-	}
-	if *runAll {
-		for _, acc := range a.Report.Acceptance {
-			blocks = append(blocks, acc.Block)
-		}
-	}
-	if len(blocks) > 0 {
-		if err := c.runAcceptance(blocks, *asJSON); err != nil {
-			return err
-		}
-		if a, err = c.r.Analyze(c.ctx, ""); err != nil {
-			return err
-		}
 	}
 	rep := a.Report
 	if *asJSON {
@@ -556,60 +546,13 @@ func (c *cli) check(args []string) error {
 	return nil
 }
 
-// runAcceptance runs acceptance sections as one work (or within the work in
-// progress).
-func (c *cli) runAcceptance(blocks []string, quiet bool) error {
-	cur, err := c.r.Current()
-	if err != nil {
-		return err
-	}
-	if cur == nil && len(blocks) > 1 {
-		if _, err := c.r.StartWork(c.ctx, blocks, "acceptance of every section", c.actor); err != nil {
-			return err
-		}
-		defer func() {
-			if _, err := c.r.FinishWork(c.ctx, "", nil); err != nil {
-				fmt.Fprintln(c.errs, "tigprint:", err)
-			}
-		}()
-	}
-	for _, b := range blocks {
-		steps, err := c.r.RunAcceptance(c.ctx, b, c.actor, 0)
-		if err != nil {
-			return err
-		}
-		if quiet {
-			continue
-		}
-		for _, s := range steps {
-			if s.Passed() {
-				fmt.Fprintf(c.out, "passed  %s\n", s.Command)
-				continue
-			}
-			fmt.Fprintf(c.out, "FAILED  %s (exit %d)\n", s.Command, *s.Exit)
-			if out, err := c.r.Objects.GetObject(c.ctx, s.Output); err == nil {
-				fmt.Fprintf(c.out, "  %s\n", strings.ReplaceAll(strings.TrimSpace(tail(string(out), 20)), "\n", "\n  "))
-			}
-		}
-	}
-	return nil
-}
-
-func tail(s string, lines int) string {
-	parts := strings.Split(s, "\n")
-	if len(parts) > lines {
-		parts = parts[len(parts)-lines:]
-	}
-	return strings.Join(parts, "\n")
-}
-
 func (c *cli) printReport(rep tig.Report) {
 	closed := "no"
 	if rep.Closed {
 		closed = "yes"
 	}
-	fmt.Fprintf(c.out, "chain from %s: %d documents, %d blocks, verify %s\n", rep.Root, rep.Docs, rep.Blocks, rep.Verify)
-	fmt.Fprintf(c.out, "closed: %s   guidelines %d, directions %d\n", closed, rep.Guidelines, rep.Directions)
+	fmt.Fprintf(c.out, "chain from %s: %d documents, %d blocks, %d lines with work\n", rep.Root, rep.Docs, rep.Blocks, rep.Marks)
+	fmt.Fprintf(c.out, "closed: %s\n", closed)
 	findings := func(label string, fs []tig.Finding) {
 		if len(fs) == 0 {
 			return
@@ -627,29 +570,11 @@ func (c *cli) printReport(rep tig.Report) {
 		}
 	}
 	findings("broken", rep.Broken)
-	findings("open", rep.Open)
 	findings("stale", rep.Stale)
 	if len(rep.Undesigned) > 0 {
 		fmt.Fprintf(c.out, "\nno design reaches:\n")
 		for _, f := range rep.Undesigned {
 			fmt.Fprintf(c.out, "  %s\n", f)
-		}
-	}
-	if len(rep.Acceptance) > 0 {
-		fmt.Fprintf(c.out, "\nacceptance:\n")
-	}
-	for _, acc := range rep.Acceptance {
-		res := "not passed"
-		if acc.Passed {
-			res = "passed"
-		}
-		fmt.Fprintf(c.out, "  %s  %s > %s: %s\n", short(acc.Block), acc.Path, acc.Accepts, res)
-		for _, cmd := range acc.Commands {
-			by := ""
-			if cmd.Runner != "" {
-				by = " by " + cmd.Runner
-			}
-			fmt.Fprintf(c.out, "    %-7s %s  (%s%s)\n", cmd.Result, cmd.Command, when(cmd.At, cmd.At.Local().Format("2006-01-02 15:04")), by)
 		}
 	}
 }
@@ -758,6 +683,357 @@ func (c *cli) work(args []string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown work command %q", args[0])
+}
+
+func (c *cli) commits(args []string) error {
+	fs := c.flags("commits")
+	n := fs.Int("n", 20, "how many")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	commits, err := c.r.Commits(c.ctx)
+	if err != nil {
+		return err
+	}
+	all := commits.All()
+	slices.Reverse(all)
+	for i, w := range all {
+		if i == *n {
+			break
+		}
+		fmt.Fprintf(c.out, "%-6s %s  %-10s %s\n", commits.Short(w.ID), w.At.Local().Format("2006-01-02 15:04"), w.Result, w.Intent)
+	}
+	return nil
+}
+
+// many collects a flag given several times.
+type many []string
+
+func (m *many) String() string     { return strings.Join(*m, ",") }
+func (m *many) Set(v string) error { *m = append(*m, v); return nil }
+
+func (c *cli) set(args []string) error {
+	fs := c.flags("set")
+	asJSON := fs.Bool("json", false, "print JSON")
+	var in tig.SetInput
+	fs.Var((*many)(&in.Sentences), "s", "a sentence, in its words")
+	fs.Var((*many)(&in.Commits), "id", "a commit")
+	fs.Var((*many)(&in.Files), "f", "a file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	a, err := c.analyze()
+	if err != nil {
+		return err
+	}
+	set := a.Relations(c.ctx).Set(in)
+	if *asJSON {
+		return printJSON(c.out, set)
+	}
+	for _, s := range set.Sentences {
+		fmt.Fprintf(c.out, "sentence %s:%d %s %s\n", s.Path, s.Line, s.Text, strings.Join(s.IDs, " "))
+	}
+	for _, w := range set.Commits {
+		fmt.Fprintf(c.out, "commit   %s %s\n", w.Short, w.Intent)
+	}
+	for _, f := range set.Files {
+		fmt.Fprintf(c.out, "file     %s\n", f)
+	}
+	if set.Baseline {
+		fmt.Fprintln(c.out, "a sentence names the baseline; its files are not listed")
+	}
+	for _, m := range set.Missing {
+		fmt.Fprintf(c.out, "missing  %s\n", m)
+	}
+	return nil
+}
+
+func (c *cli) groups(args []string) error {
+	fs := c.flags("groups")
+	asJSON := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	a, err := c.analyze()
+	if err != nil {
+		return err
+	}
+	groups := a.Relations(c.ctx).Groups()
+	if *asJSON {
+		return printJSON(c.out, groups)
+	}
+	for _, g := range groups {
+		fmt.Fprintf(c.out, "%-11s %-8s %d sentences, %d commits, %d files\n", g.Kind, g.Key, len(g.Sentences), len(g.Commits), len(g.Files))
+	}
+	return nil
+}
+
+func printJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
+func (c *cli) commit(args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: tigprint commit <id>")
+	}
+	a, err := c.analyze()
+	if err != nil {
+		return err
+	}
+	v, err := a.Commit(args[0])
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "%s  %s\n%s  %s by %s\n", v.Short, v.ID, v.At.Local().Format("2006-01-02 15:04"), v.Result, v.Actor)
+	fmt.Fprintf(c.out, "\n  %s\n\n", v.Intent)
+	if len(v.ChildIDs) > 0 {
+		fmt.Fprintf(c.out, "folds: %s\n", strings.Join(v.ChildIDs, ", "))
+	}
+	if len(v.Files) > 0 {
+		fmt.Fprintf(c.out, "files: %s\n", strings.Join(v.Files, ", "))
+	}
+	for _, m := range v.Marks {
+		fmt.Fprintf(c.out, "sentence: %s:%d  %s\n", m.Path, m.Line, m.Text)
+	}
+	return nil
+}
+
+func (c *cli) mark(args []string) error {
+	fs := c.flags("mark")
+	ids := fs.String("id", "", "the commits, separated by commas")
+	doc := fs.String("doc", "", "the document (default: the main document)")
+	under := fs.String("under", "", "the section a new sentence goes under")
+	inferred := fs.Bool("inferred", false, "it is a guess: for the inferred document unless the main document says it")
+	confirm := fs.Bool("confirm", false, "a person says this is what was meant")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		return errors.New("usage: tigprint mark [-id a1b2,c3d4] [-doc f.md] [-under title] [-inferred] [-confirm] <sentence>")
+	}
+	var refs []string
+	if *ids != "" {
+		refs = strings.Split(*ids, ",")
+	}
+	in := tig.MarkInput{Path: *doc, Under: *under, IDs: refs, Inferred: *inferred, Actor: c.actor, Via: tig.ViaDirect}
+	if *confirm {
+		in.State, in.By = tig.IntentConfirmed, tig.ByHuman
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	in.Sentence = strings.Join(fs.Args(), " ")
+	m, err := c.r.Mark(c.ctx, in)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "%s:%d  %s  %s\n", m.Path, m.Line, strings.Join(m.IDs, " "), m.Text)
+	return nil
+}
+
+func (c *cli) fold(args []string) error {
+	fs := c.flags("fold")
+	intent := fs.String("m", "", "what the commits are, together")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *intent == "" || fs.NArg() < 2 {
+		return errors.New("usage: tigprint fold -m intent <id> <id>...")
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	w, err := c.r.Fold(c.ctx, tig.FoldInput{Commits: fs.Args(), Intent: *intent, Actor: c.actor})
+	if err != nil {
+		return err
+	}
+	commits, err := c.r.Commits(c.ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "%s folds %s\n", commits.Short(w.ID), strings.Join(fs.Args(), " "))
+	return nil
+}
+
+func (c *cli) unmark(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: tigprint unmark <id>...")
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	return c.r.Unmark(c.ctx, args)
+}
+
+func (c *cli) sync(_ []string) error {
+	if err := c.open(); err != nil {
+		return err
+	}
+	res, err := c.r.Sync(c.ctx, c.actor)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "%d documents rewritten, %d intents touched, %d moved, %d old marks converted\n", len(res.Docs), len(res.Touched), len(res.Moved), res.Migrated)
+	for _, i := range res.Touched {
+		fmt.Fprintf(c.out, "touched %s: confirm it again\n", i)
+	}
+	return nil
+}
+
+func (c *cli) decide(name string, args []string, do func(tig.DecideInput) (*tig.Intent, error), set func(fs *flag.FlagSet, in *tig.DecideInput)) error {
+	fs := c.flags(name)
+	var in tig.DecideInput
+	fs.StringVar(&in.Reason, "m", "", "why")
+	if set != nil {
+		set(fs, &in)
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: tigprint %s <intent>", name)
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	in.Intent, in.By, in.Via, in.Actor = fs.Arg(0), tig.ByHuman, tig.ViaDirect, c.actor
+	i, err := do(in)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "%s#%d  %s  %s\n", i.Short, i.Revision, i.State, i.Text)
+	return nil
+}
+
+func (c *cli) confirm(args []string) error {
+	return c.decide("confirm", args, func(in tig.DecideInput) (*tig.Intent, error) { return c.r.ConfirmIntent(c.ctx, in) },
+		func(fs *flag.FlagSet, in *tig.DecideInput) {
+			fs.StringVar(&in.Under, "under", "", "the section of the main document it goes under")
+		})
+}
+
+func (c *cli) reject(args []string) error {
+	return c.decide("reject", args, func(in tig.DecideInput) (*tig.Intent, error) { return c.r.RejectIntent(c.ctx, in) }, nil)
+}
+
+func (c *cli) retire(args []string) error {
+	var by string
+	return c.decide("retire", args, func(in tig.DecideInput) (*tig.Intent, error) {
+		if by != "" {
+			in.From = []string{by}
+		}
+		return c.r.RetireIntent(c.ctx, in)
+	}, func(fs *flag.FlagSet, _ *tig.DecideInput) {
+		fs.StringVar(&by, "by", "", "the intent that took its place")
+	})
+}
+
+func (c *cli) accept(args []string) error {
+	fs := c.flags("accept")
+	reject := fs.Bool("reject", false, "record it as rejected")
+	reason := fs.String("m", "", "why")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: tigprint accept [-reject] [-m why] <id>")
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	state := tig.WorkAccepted
+	if *reject {
+		state = tig.WorkRejected
+	}
+	a, err := c.r.Accept(c.ctx, tig.AcceptInput{Work: fs.Arg(0), State: state, By: tig.ByHuman, Via: tig.ViaDirect, Actor: c.actor, Reason: *reason})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "%s %s\n", short(a.Work), a.State)
+	return nil
+}
+
+// showRef prints what a reference means.
+func (c *cli) showRef(ref string) error {
+	v, err := c.r.Show(c.ctx, ref)
+	if err != nil {
+		return err
+	}
+	switch {
+	case v.Intent != nil:
+		i := v.Intent
+		who := i.By
+		if i.Via != "" {
+			who = strings.TrimSpace(who + " via " + i.Via)
+		}
+		fmt.Fprintf(c.out, "%s#%d  %s", i.Short, i.Revision, i.State)
+		if who != "" {
+			fmt.Fprintf(c.out, " (%s)", who)
+		}
+		fmt.Fprintf(c.out, "\n  text   %s\n", i.Text)
+		for _, p := range i.Places {
+			fmt.Fprintf(c.out, "  place  %s:%d  %s\n", p.Path, p.Line, p.Ref)
+		}
+		for _, w := range i.Works {
+			fmt.Fprintf(c.out, "  work   %s %s #%d (%s)\n", w.Short, w.Kind, w.Revision, w.Acceptance)
+		}
+		if i.Previous != nil {
+			fmt.Fprintf(c.out, "  before %s %q", i.Previous.Ref, i.Previous.Text)
+			if i.Previous.Reason != "" {
+				fmt.Fprintf(c.out, ": %s", i.Previous.Reason)
+			}
+			fmt.Fprintln(c.out)
+		}
+		fmt.Fprintf(c.out, "  sync   %s\n", i.Sync)
+	case v.Line != nil:
+		fmt.Fprintf(c.out, "%s\n  text   %s\n", v.Line.Hash, v.Line.Text)
+		if v.Line.Range != "" {
+			fmt.Fprintf(c.out, "  range  %s\n", v.Line.Range)
+		}
+		for _, p := range v.Line.Places {
+			fmt.Fprintf(c.out, "  place  %s:%d\n", p.Path, p.Line)
+		}
+		for _, i := range v.Line.Intents {
+			fmt.Fprintf(c.out, "  intent %s\n", i)
+		}
+	case v.Work != nil:
+		fmt.Fprintf(c.out, "%s  %s  %s\n", v.Work.Short, v.Work.Acceptance, v.Work.Intent)
+		for _, f := range v.Work.Files {
+			fmt.Fprintf(c.out, "  file   %s\n", f)
+		}
+		for _, i := range v.Work.Intents {
+			fmt.Fprintf(c.out, "  intent %s\n", i)
+		}
+	case v.Event != nil:
+		fmt.Fprintf(c.out, "ev%s  %s %s #%d  %s via %s  %s\n", v.Event.ID[:8], v.Event.Short, v.Event.Kind, v.Event.Revision, v.Event.By, v.Event.Via, v.Event.Reason)
+	}
+	return nil
+}
+
+func (c *cli) baseline(args []string) error {
+	fs := c.flags("baseline")
+	intent := fs.String("m", "the project as it was before tig", "what it is")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	w, err := c.r.Baseline(c.ctx, *intent, c.actor)
+	if err != nil {
+		return err
+	}
+	commits, err := c.r.Commits(c.ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "%s  %s\n", commits.Short(w.ID), w.Intent)
+	return nil
 }
 
 // basis turns block references into hashes.
@@ -886,14 +1162,13 @@ func (c *cli) workFinish(args []string) error {
 
 func (c *cli) mcp(args []string) error {
 	fs := c.flags("mcp")
-	allowRun := fs.Bool("run", false, "let agents have tig run acceptance commands")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if err := c.open(); err != nil {
 		return err
 	}
-	s := mcpserver.New(c.r, mcpserver.Options{Version: version, AllowRun: *allowRun})
+	s := mcpserver.New(c.r, mcpserver.Options{Version: version})
 	return s.Run(c.ctx, &mcp.StdioTransport{})
 }
 

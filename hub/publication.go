@@ -111,9 +111,6 @@ type BlockView struct {
 	Level   int      `json:"level"`
 	Title   string   `json:"title"`
 	Start   int      `json:"start"`
-	Status  string   `json:"status,omitempty"` // guideline, direction or open; "" for blocks without design
-	Cover   string   `json:"cover,omitempty"`  // the acceptance section that accepts it
-	Accept  []string `json:"accept,omitempty"`
 	Details []string `json:"details,omitempty"` // detail documents its own text links to
 	Refs    []string `json:"refs,omitempty"`    // project files its own text links to
 	Built   []string `json:"built,omitempty"`   // files the footprint built for it
@@ -137,7 +134,7 @@ func viewOf(a *tig.Analysis) ChainView {
 		built := slices.Clone(a.Built[h])
 		sort.Strings(built)
 		v.Blocks = append(v.Blocks, BlockView{Hash: h, Path: b.Path, Parent: b.Parent, Level: b.Level, Title: b.Title,
-			Start: b.Start, Status: a.Status[h], Cover: a.Cover[h], Accept: b.Accept, Details: c.Details[h],
+			Start: b.Start, Details: c.Details[h],
 			Refs: c.Refs[h], Built: built})
 	}
 	return v

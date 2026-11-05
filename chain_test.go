@@ -84,16 +84,12 @@ func TestChainClosure(t *testing.T) {
 	if len(rep.Broken) != 1 || rep.Broken[0].Path != "docs/orphan.md" {
 		t.Fatalf("broken: %s", messages(rep.Broken))
 	}
-	if len(rep.Open) != 0 {
-		t.Fatalf("open: %s", messages(rep.Open))
-	}
 	if strings.Join(rep.Undesigned, ",") != "src/turn.js" {
 		t.Fatalf("undesigned: %v", rep.Undesigned)
 	}
 	turning := find(t, c, "README.md", "Turning")
-	scramble := find(t, c, "README.md", "Scramble")
-	if a.Status[scramble.Hash] != tig.StatusDirection || a.Status[turning.Hash] != tig.StatusDirection || rep.Closed {
-		t.Fatalf("before any check everything designed is a direction: %v", a.Status)
+	if rep.Closed {
+		t.Fatal("not closed yet")
 	}
 
 	// An agent builds turn.js for the turning document and reports its checks.
@@ -101,12 +97,6 @@ func TestChainClosure(t *testing.T) {
 	r.StartWork(ctx, []string{turnBlock.Hash}, "build turning", "agent")
 	write(t, root, "src/turn.js", "turn(layer)\n")
 	r.RecordStep(ctx, tig.StepInput{Kind: tig.StepEdit})
-	zero := 0
-	for _, acc := range rep.Acceptance {
-		for _, cmd := range acc.Commands {
-			r.RecordStep(ctx, tig.StepInput{Kind: tig.StepCheck, Basis: []string{acc.Block}, Command: cmd.Command, Exit: &zero})
-		}
-	}
 	if _, err := r.FinishWork(ctx, "", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -114,11 +104,8 @@ func TestChainClosure(t *testing.T) {
 
 	a, _ = r.Analyze(ctx, "")
 	rep = a.Report
-	// Cube game, Turning and Scramble in the main document, Turning in the
-	// detail document.
-	if !rep.Closed || rep.Guidelines != 4 || rep.Directions != 0 {
-		t.Fatalf("closed %v guidelines %d directions %d\nbroken %s\nopen %s\nstale %s\nundesigned %v",
-			rep.Closed, rep.Guidelines, rep.Directions, messages(rep.Broken), messages(rep.Open), messages(rep.Stale), rep.Undesigned)
+	if !rep.Closed {
+		t.Fatalf("broken %s\nstale %s\nundesigned %v", messages(rep.Broken), messages(rep.Stale), rep.Undesigned)
 	}
 	if built := a.Built[turnBlock.Hash]; len(built) != 1 || built[0] != "src/turn.js" {
 		t.Fatalf("built: %v", a.Built)
@@ -130,22 +117,6 @@ func TestChainClosure(t *testing.T) {
 		t.Fatal("a file's trail is the works that changed it")
 	}
 
-	// Strictly, only the checks tig ran itself count.
-	r.SetConfig(tig.Config{Root: "README.md", Verify: tig.VerifyStrict})
-	a, _ = r.Analyze(ctx, "")
-	if a.Report.Guidelines != 0 || a.Report.Directions != 4 {
-		t.Fatalf("strict: %+v", a.Report)
-	}
-	for _, acc := range a.Report.Acceptance {
-		steps, err := r.RunAcceptance(ctx, acc.Block, "ci", 0)
-		if err != nil || len(steps) != 1 || !steps[0].Passed() || steps[0].Runner != tig.RunnerTig {
-			t.Fatalf("run %s: %+v %v", acc.Accepts, steps, err)
-		}
-	}
-	a, _ = r.Analyze(ctx, "")
-	if !a.Report.Closed || a.Report.Guidelines != 4 {
-		t.Fatalf("after tig ran the acceptance: %+v", a.Report)
-	}
 	hits := a.Search("turn LAYER", []string{"src/turn.js"})
 	if len(hits) != 2 || hits[1].Ref != turnBlock.Hash {
 		t.Fatalf("search: %+v", hits)
@@ -208,37 +179,7 @@ func TestStaleLinks(t *testing.T) {
 	}
 }
 
-func TestCoverRules(t *testing.T) {
-	ctx := context.Background()
-	root := t.TempDir()
-	// The top section hands on to a detail document, but a section under it
-	// with its own acceptance is accepted by that; a section without one is
-	// handed on with its parent. An intro is covered by its sections.
-	write(t, root, "README.md", "# Shop\n\nA shop. Prices: [pricing](docs/pricing.md).\n\n## Cart\n\nAdds items.\n\n### Acceptance\n\n- `echo cart`\n\n## Notes\n\nPlain.\n")
-	write(t, root, "docs/pricing.md", "# Pricing\n\nCents.\n\n## Greeting\n\nHi.\n\n### Acceptance\n\n- `echo hi`\n\n## Farewell\n\nBye.\n")
-	r := open(t, root)
-	a, _ := r.Analyze(ctx, "")
-	c := a.Chain
-	cart, notes, shop := find(t, c, "README.md", "Cart"), find(t, c, "README.md", "Notes"), find(t, c, "README.md", "Shop")
-	pricingTop, farewell := find(t, c, "docs/pricing.md", "Pricing"), find(t, c, "docs/pricing.md", "Farewell")
-	if a.Cover[cart.Hash] == "" || a.Status[cart.Hash] != tig.StatusDirection {
-		t.Fatalf("a section with its own acceptance: %q %q", a.Cover[cart.Hash], a.Status[cart.Hash])
-	}
-	if a.Status[notes.Hash] != tig.StatusOpen || a.Status[shop.Hash] != tig.StatusOpen || a.Status[pricingTop.Hash] != tig.StatusOpen {
-		t.Fatalf("Farewell is open, so is what reaches it: %v", a.Status)
-	}
-	if len(a.Report.Open) != 1 || a.Report.Open[0].Block != farewell.Hash {
-		t.Fatalf("only the uncovered section itself is reported: %s", messages(a.Report.Open))
-	}
-
-	write(t, root, "docs/pricing.md", "# Pricing\n\nCents.\n\n## Greeting\n\nHi.\n\n### Acceptance\n\n- `echo hi`\n")
-	a, _ = r.Analyze(ctx, "")
-	if !a.Report.Closed || a.Status[find(t, a.Chain, "docs/pricing.md", "Pricing").Hash] != tig.StatusDirection {
-		t.Fatalf("an intro covered by its sections: %+v %v", a.Report, a.Status)
-	}
-}
-
-func TestOpenAndBroken(t *testing.T) {
+func TestBroken(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	write(t, root, "README.md", "# Game\n\nNo acceptance here. See [missing](docs/missing.md) and [detail](docs/detail.md).\n\n## Rules\n\nSome rules.\n")
@@ -251,11 +192,6 @@ func TestOpenAndBroken(t *testing.T) {
 	rep := a.Report
 	if len(rep.Broken) != 2 || !strings.Contains(messages(rep.Broken), "docs/missing.md, which does not exist") || !strings.Contains(messages(rep.Broken), "docs/empty.md") {
 		t.Fatalf("broken: %s", messages(rep.Broken))
-	}
-	// The Game section hands on to docs/detail.md, so its Rules are handed on
-	// too; the detail document has design without acceptance.
-	if !strings.Contains(messages(rep.Open), "docs/detail.md: no acceptance covers this block") || !strings.Contains(messages(rep.Open), "the detail document has no acceptance") {
-		t.Fatalf("open: %s", messages(rep.Open))
 	}
 	if rep.Closed {
 		t.Fatal("not closed")

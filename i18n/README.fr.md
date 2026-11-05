@@ -9,6 +9,8 @@
 
 > Ceci est une traduction de [README.md](../README.md). La version anglaise est l'original, celle que tig vérifie ; en cas de différence, c'est elle qui fait foi.
 
+> **Remarque :** cette traduction décrit encore l'ancien format de marques et la validation par tig. En attendant sa mise à jour, la version anglaise fait foi.
+
 > Ce tig n'est pas [tig, l'interface texte pour Git](https://github.com/jonas/tig). C'est pourquoi sa commande s'appelle `tigprint`.
 
 ## Pourquoi tig

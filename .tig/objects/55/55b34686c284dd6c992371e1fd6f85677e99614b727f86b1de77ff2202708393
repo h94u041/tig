@@ -1,0 +1,285 @@
+package tig
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"slices"
+	"strings"
+	"time"
+)
+
+// A commit is a work: one person's or agent's intent carried out, with the
+// steps it took. Documents name commits by their short IDs, so a short ID has
+// to stay what it is for good.
+//
+// A short ID is at least 4 characters of the commit's hash. Commits take them
+// in the order of the chain: the first one with a prefix keeps it, and a later
+// commit that would collide lengthens its own. Anyone with the chain works out
+// the same IDs, and writing a new commit never changes an older one's.
+//
+// A commit may fold others under it. Folding only collapses them: the
+// children stay as they were and their IDs still resolve.
+
+const minShortID = 4
+
+// Commits is the project's commits and their short IDs.
+type Commits struct {
+	order   []Work
+	byID    map[string]int
+	short   map[string]string // id → short ID
+	byShort map[string]string // short ID → id
+}
+
+// NewCommits indexes works in the order of the chain, oldest first. A work
+// without an ID (one in progress) is left out.
+func NewCommits(works []Work) *Commits {
+	c := &Commits{byID: map[string]int{}, short: map[string]string{}, byShort: map[string]string{}}
+	for _, w := range works {
+		if w.ID == "" {
+			continue
+		}
+		c.byID[w.ID] = len(c.order)
+		c.order = append(c.order, w)
+		n := minShortID
+		for n < len(w.ID) {
+			if _, taken := c.byShort[w.ID[:n]]; !taken {
+				break
+			}
+			n++
+		}
+		c.short[w.ID] = w.ID[:n]
+		c.byShort[w.ID[:n]] = w.ID
+	}
+	return c
+}
+
+// Commits reads the project's commits.
+func (r *Repo) Commits(ctx context.Context) (*Commits, error) {
+	works, err := r.Works(ctx, 0)
+	if err != nil {
+		return nil, err
+	}
+	slices.Reverse(works)
+	return NewCommits(works), nil
+}
+
+// All is every commit, oldest first.
+func (c *Commits) All() []Work { return slices.Clone(c.order) }
+
+// Short is a commit's short ID.
+func (c *Commits) Short(id string) string { return c.short[id] }
+
+// Resolve finds a commit by its short ID, or by its hash or a unique prefix of
+// it of at least 4 characters.
+func (c *Commits) Resolve(ref string) (Work, error) {
+	if id, ok := c.byShort[ref]; ok {
+		return c.order[c.byID[id]], nil
+	}
+	if i, ok := c.byID[ref]; ok {
+		return c.order[i], nil
+	}
+	if len(ref) < minShortID {
+		return Work{}, fmt.Errorf("tig: no commit %q (give at least %d characters)", ref, minShortID)
+	}
+	found := ""
+	for id := range c.byID {
+		if strings.HasPrefix(id, ref) {
+			if found != "" {
+				return Work{}, fmt.Errorf("tig: %q matches more than one commit", ref)
+			}
+			found = id
+		}
+	}
+	if found == "" {
+		return Work{}, fmt.Errorf("tig: no commit %q", ref)
+	}
+	return c.order[c.byID[found]], nil
+}
+
+// Leaves is the commits a commit stands for: itself, or what it folds, all
+// the way down.
+func (c *Commits) Leaves(id string) []string {
+	i, ok := c.byID[id]
+	if !ok {
+		return nil
+	}
+	if len(c.order[i].Children) == 0 {
+		return []string{id}
+	}
+	var out []string
+	for _, k := range c.order[i].Children {
+		for _, leaf := range c.Leaves(k) {
+			out = appendNew(out, leaf)
+		}
+	}
+	return out
+}
+
+// FoldInput says which commits to fold.
+type FoldInput struct {
+	Commits []string // short IDs, hashes or unique prefixes
+	Intent  string
+	Actor   string
+}
+
+// Fold writes a commit that folds the given ones under it, and replaces them
+// with it in the marks of every document of the chain. It returns the new
+// commit and the documents it changed.
+func (r *Repo) Fold(ctx context.Context, in FoldInput) (Work, []string, error) {
+	if r.Dir == "" {
+		return Work{}, nil, errors.New("tig: folding needs a .tig folder")
+	}
+	unlock, err := lockRepo(ctx, r.Dir)
+	if err != nil {
+		return Work{}, nil, err
+	}
+	defer unlock()
+	works, err := r.Works(ctx, 0)
+	if err != nil {
+		return Work{}, nil, err
+	}
+	slices.Reverse(works)
+	commits := NewCommits(works)
+	var ids, written []string
+	for _, ref := range in.Commits {
+		w, err := commits.Resolve(ref)
+		if err != nil {
+			return Work{}, nil, err
+		}
+		if !slices.Contains(ids, w.ID) {
+			ids = append(ids, w.ID)
+			written = append(written, commits.Short(w.ID))
+		}
+	}
+	if len(ids) < 2 {
+		return Work{}, nil, errors.New("tig: folding takes at least two commits")
+	}
+	now := time.Now().UTC()
+	w, err := r.putWork(ctx, Work{Intent: in.Intent, Children: ids, Result: ResultFolded, Actor: in.Actor, Started: now, At: now})
+	if err != nil {
+		return Work{}, nil, err
+	}
+	parent := NewCommits(append(works, w)).Short(w.ID)
+	chain, err := r.Chain(ctx, "")
+	if err != nil {
+		return w, nil, err
+	}
+	var changed []string
+	for _, doc := range chain.Docs {
+		full, err := r.safePath(doc)
+		if err != nil {
+			return w, changed, err
+		}
+		content, err := os.ReadFile(full)
+		if err != nil {
+			return w, changed, err
+		}
+		if out := FoldMarks(content, parent, written); string(out) != string(content) {
+			if err := writeAtomic(full, out, 0o644); err != nil {
+				return w, changed, err
+			}
+			changed = append(changed, doc)
+		}
+	}
+	return w, changed, nil
+}
+
+// Baseline writes the commit for everything the project already was before it
+// joined tig, so the design written later can say which of it is what. Its
+// one step is the whole project, from nothing.
+func (r *Repo) Baseline(ctx context.Context, intent, actor string) (Work, error) {
+	if r.Dir == "" {
+		return Work{}, errors.New("tig: a baseline needs a .tig folder")
+	}
+	works, err := r.Works(ctx, 0)
+	if err != nil {
+		return Work{}, err
+	}
+	for _, w := range works {
+		if w.Result == ResultBaseline {
+			return Work{}, fmt.Errorf("tig: the project has a baseline already (%s)", w.ID)
+		}
+	}
+	snap, _, err := r.Take(ctx, ReasonOpen, actor)
+	if err != nil {
+		return Work{}, err
+	}
+	empty, err := WriteTree(ctx, r.Objects, nil)
+	if err != nil {
+		return Work{}, err
+	}
+	now := time.Now().UTC()
+	s, err := r.PutStep(ctx, Step{Kind: StepEdit, Before: empty, After: snap.Tree, Note: intent, Actor: actor, At: now})
+	if err != nil {
+		return Work{}, err
+	}
+	return r.PutWork(ctx, Work{Intent: intent, After: snap.ID, Steps: []string{s.ID}, Result: ResultBaseline, Actor: actor, Started: now, At: now})
+}
+
+// CommitView is a commit with what hangs on it.
+type CommitView struct {
+	Work
+	Short string `json:"short"`
+	// Files are the project files its steps changed (a fold: those of the
+	// commits under it), documents left out.
+	Files []string `json:"files,omitempty"`
+	// Marks are the sentences that name it, or a commit folding it.
+	Marks []Mark `json:"marks,omitempty"`
+	// ChildIDs are the short IDs of the commits it folds, in order.
+	ChildIDs []string `json:"childIds,omitempty"`
+}
+
+// Commit finds one commit with its files and marks.
+func (a *Analysis) Commit(ref string) (CommitView, error) {
+	w, err := a.commits.Resolve(ref)
+	if err != nil {
+		return CommitView{}, err
+	}
+	v := CommitView{Work: w, Short: a.commits.Short(w.ID), Marks: a.workMarks[w.ID]}
+	for _, leaf := range a.commits.Leaves(w.ID) {
+		for _, f := range a.workFiles[leaf] {
+			v.Files = appendNew(v.Files, f)
+		}
+	}
+	for _, k := range w.Children {
+		v.ChildIDs = append(v.ChildIDs, a.commits.Short(k))
+	}
+	return v, nil
+}
+
+// CommitsOf is the commits a block's sentences name, itself only, oldest
+// first: the block's own line of commits. Folded commits count under their
+// parent, once.
+func (a *Analysis) CommitsOf(block string) []CommitView {
+	var out []CommitView
+	b := a.Chain.Blocks[block]
+	if b == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, m := range b.Marks {
+		for _, id := range m.IDs {
+			v, err := a.Commit(id)
+			if err == nil && !seen[v.ID] {
+				seen[v.ID] = true
+				out = append(out, v)
+			}
+		}
+	}
+	slices.SortStableFunc(out, func(x, y CommitView) int { return x.At.Compare(y.At) })
+	return out
+}
+
+// Marks is every marked sentence of the chain, in chain order.
+func (a *Analysis) Marks() []Mark {
+	var out []Mark
+	for _, h := range a.Chain.Order {
+		out = append(out, a.Chain.Blocks[h].Marks...)
+	}
+	return out
+}
+
+// Commits is the project's commits.
+func (a *Analysis) Commits() *Commits { return a.commits }

@@ -1,0 +1,7 @@
+tig-step 1
+kind edit
+before b8540b4d4d424ea12906963237f1fcf47f590292b843dc90273fa2e60a2fdf25
+after b8540b4d4d424ea12906963237f1fcf47f590292b843dc90273fa2e60a2fdf25
+note marks.go, commits.go, sessions in work.go, the mark findings in chain.go, commands and MCP tools
+actor claude
+at 2026-11-04T16:03:36.3916011Z

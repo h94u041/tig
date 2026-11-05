@@ -27,7 +27,11 @@ type Chain struct {
 	Details  map[string][]string `json:"-"` // block → detail documents its own text links to
 	Refs     map[string][]string `json:"-"` // block → project files (and folders, ending in "/") its own text links to
 	Orphans  []string            `json:"orphans,omitempty"`
-	Missing  []Finding           `json:"missing,omitempty"` // links to documents or files that do not exist
+	// Inferred is the document for sentences nobody has agreed with yet, and
+	// InferredBlocks its blocks. It is outside the chain's order: it is not design.
+	Inferred       string    `json:"inferred,omitempty"`
+	InferredBlocks []*Block  `json:"-"`
+	Missing        []Finding `json:"missing,omitempty"` // links to documents or files that do not exist
 
 	outside []string
 	src     source
@@ -40,7 +44,19 @@ type Finding struct {
 	Title   string `json:"title,omitempty"`
 	Line    int    `json:"line,omitempty"`
 	Message string `json:"message"`
+	// Code says which kind of finding it is, for the ones about marks.
+	Code string `json:"code,omitempty"`
 }
+
+// What a finding about a mark says went wrong.
+const (
+	FindBrokenMark    = "broken-mark"    // the sentence names a commit that does not exist
+	FindIntentChanged = "intent-changed" // the sentence was reworded and no commit followed
+	FindCodeAway      = "code-away"      // a file its commits built changed outside any commit
+	FindUnsynced      = "unsynced"       // the line still holds a mark in the old format
+	FindReview        = "review"         // the intent's text changed and nobody has confirmed it since
+	FindIntentMissing = "intent-missing" // a confirmed intent's line is no longer in any document
+)
 
 // source is where the chain reads files: a tree, or the working files.
 type source interface {
@@ -216,8 +232,19 @@ func (r *Repo) Chain(ctx context.Context, tree string) (*Chain, error) {
 			}
 		}
 	}
+	c.Inferred = cfg.InferredDoc()
+	if exists[c.Inferred] && !queued[c.Inferred] {
+		queued[c.Inferred] = true
+		if data, err := src.read(ctx, c.Inferred); err == nil {
+			blocks := ParseBlocks(c.Inferred, data)
+			for i := range blocks {
+				c.InferredBlocks = append(c.InferredBlocks, &blocks[i])
+				c.Blocks[blocks[i].Hash] = &blocks[i]
+			}
+		}
+	}
 	for _, f := range files {
-		if IsMarkdown(f) && !queued[f] && !c.isOutside(f) {
+		if IsMarkdown(f) && !queued[f] && f != c.Inferred && !c.isOutside(f) {
 			c.Orphans = append(c.Orphans, f)
 		}
 	}
@@ -295,64 +322,6 @@ func (c *Chain) Block(ref string) (*Block, error) {
 	return found, nil
 }
 
-// inAcceptance reports whether a block is an acceptance section or inside
-// one.
-func (c *Chain) inAcceptance(h string) bool {
-	for b := c.Blocks[h]; b != nil; b = c.Blocks[b.Parent] {
-		if b.IsAcceptance() {
-			return true
-		}
-	}
-	return false
-}
-
-// isContent reports whether a block holds design that needs accepting: any
-// section that is not acceptance, and a document's own text when it has
-// some.
-func (c *Chain) isContent(h string) bool {
-	b := c.Blocks[h]
-	if b == nil || c.inAcceptance(h) {
-		return false
-	}
-	return b.Level > 0 || b.Text != ""
-}
-
-// cover is what accepts a block. Walking up from the block, the first that
-// comes wins: an acceptance section directly under a block (acc), or a block
-// whose own text hands on to detail documents (by). With neither, the block
-// is covered by its sections, if it has any.
-func (c *Chain) cover(h string) (acc, by string) {
-	for b := c.Blocks[h]; b != nil; b = c.Blocks[b.Parent] {
-		for _, k := range c.Children[b.Hash] {
-			if c.Blocks[k].IsAcceptance() {
-				return k, ""
-			}
-		}
-		if len(c.Details[b.Hash]) > 0 {
-			return "", b.Hash
-		}
-	}
-	return "", ""
-}
-
-// delegated reports whether a block hands its acceptance to detail
-// documents.
-func (c *Chain) delegated(h string) bool {
-	_, by := c.cover(h)
-	return by != ""
-}
-
-// sections are the blocks directly under a block that hold design.
-func (c *Chain) sections(h string) []string {
-	var out []string
-	for _, k := range c.Children[h] {
-		if c.isContent(k) {
-			out = append(out, k)
-		}
-	}
-	return out
-}
-
 // The footprint as the chain sees it.
 
 type history struct {
@@ -378,8 +347,12 @@ func (r *Repo) history(ctx context.Context) (*history, error) {
 			h.steps[id] = s
 		}
 	}
-	if cur, err := r.Current(); err == nil && cur != nil {
-		// The work in progress counts too, as an unfinished work.
+	// The works in progress count too, as unfinished works.
+	open, err := r.OpenWorks()
+	if err != nil {
+		return nil, err
+	}
+	for _, cur := range open {
 		w := Work{Basis: cur.Basis, Intent: cur.Intent, Before: cur.Before, Steps: cur.Steps, Actor: cur.Actor, Started: cur.Started, Result: "in-progress"}
 		for _, id := range cur.Steps {
 			if s, err := LoadStep(ctx, r.Objects, id); err == nil {
@@ -433,7 +406,8 @@ func (r *Repo) workingLineage(ctx context.Context, c *Chain, h *history) {
 				after = append(after, *b)
 			}
 		}
-		matches, _, _ := MatchBlocks(blocksAt(ctx, r.Objects, head.Tree, doc), after)
+		then := blocksAt(ctx, r.Objects, head.Tree, doc)
+		matches, _, _ := MatchBlocks(then, after)
 		for _, m := range matches {
 			h.successors[m.Old] = appendNew(h.successors[m.Old], m.New)
 		}
@@ -467,74 +441,46 @@ func (h *history) current(c *Chain, hash string) []string {
 	return out
 }
 
-// Analysis is the chain together with its footprint: what is closed, what
-// is a guideline (built and accepted) or a direction (designed with an
-// acceptance, not accepted yet), and what was built for each block.
+// Analysis is the chain together with its footprint and the ledger: what the
+// lines mean, what was built for each block, and where they have come apart.
+// It reports facts. Whether a piece of work is good enough is for whoever takes
+// it to judge.
 type Analysis struct {
 	Chain  *Chain
 	Report Report
-	// Status of each block with design: guideline, direction or open.
-	Status map[string]string
-	// Cover is the acceptance section that accepts each block.
-	Cover map[string]string
 	// Built is the files the footprint built for each block.
 	Built map[string][]string
+	// Ledger is the intents and links as they stand.
+	Ledger *Ledger
 
-	hist     *history
-	verify   string
-	accepted map[string]bool // acceptance section → its commands last passed
+	hist *history
+
+	commits    *Commits
+	workFiles  map[string][]string // commit → the files its steps changed, documents left out
+	workMarks  map[string][]Mark   // commit → the sentences naming it or a commit folding it
+	workBlocks map[string][]string // commit → the blocks of those sentences
 }
-
-// Block statuses.
-const (
-	StatusGuideline = "guideline"
-	StatusDirection = "direction"
-	StatusOpen      = "open"
-)
 
 // Report is the closure check.
 type Report struct {
-	Root       string       `json:"root"`
-	Closed     bool         `json:"closed"`
-	Verify     string       `json:"verify"`
-	Docs       int          `json:"docs"`
-	Blocks     int          `json:"blocks"`
-	Guidelines int          `json:"guidelines"`
-	Directions int          `json:"directions"`
-	Broken     []Finding    `json:"broken,omitempty"`
-	Open       []Finding    `json:"open,omitempty"`
-	Stale      []Finding    `json:"stale,omitempty"`
-	Undesigned []string     `json:"undesigned,omitempty"`
-	Acceptance []Acceptance `json:"acceptance,omitempty"`
-}
-
-// Acceptance is one acceptance section and how its commands last went.
-type Acceptance struct {
-	Block    string          `json:"block"`
-	Path     string          `json:"path"`
-	Accepts  string          `json:"accepts"` // the title of the section it accepts
-	Passed   bool            `json:"passed"`
-	Covers   int             `json:"covers"`
-	Commands []CommandResult `json:"commands"`
-}
-
-// CommandResult is how an acceptance command last went.
-type CommandResult struct {
-	Command string    `json:"command"`
-	Result  string    `json:"result"` // passed, failed, never
-	Runner  string    `json:"runner,omitempty"`
-	At      time.Time `json:"at,omitzero"`
-	Step    string    `json:"step,omitempty"`
+	Root       string    `json:"root"`
+	Closed     bool      `json:"closed"`
+	Docs       int       `json:"docs"`
+	Blocks     int       `json:"blocks"`
+	Broken     []Finding `json:"broken,omitempty"`
+	Stale      []Finding `json:"stale,omitempty"`
+	Undesigned []string  `json:"undesigned,omitempty"`
+	Marks      int       `json:"marks"`
+	// Unbound is the commits no sentence names. It does not open the chain: it
+	// says which work the design has not caught up with.
+	Unbound []string `json:"unbound,omitempty"`
 }
 
 // Analyze reads the chain (from a tree, or the working files when tree is
-// "") and checks it against the footprint.
+// "") and checks it against the footprint and the ledger. It only reads: a line
+// edited since the last sync shows as unsynced.
 func (r *Repo) Analyze(ctx context.Context, tree string) (*Analysis, error) {
 	c, err := r.Chain(ctx, tree)
-	if err != nil {
-		return nil, err
-	}
-	cfg, err := r.Config()
 	if err != nil {
 		return nil, err
 	}
@@ -545,216 +491,20 @@ func (r *Repo) Analyze(ctx context.Context, tree string) (*Analysis, error) {
 	if tree == "" {
 		r.workingLineage(ctx, c, h)
 	}
-	a := &Analysis{Chain: c, Status: map[string]string{}, Cover: map[string]string{}, Built: map[string][]string{}, hist: h, verify: cfg.Verify}
+	l, err := r.Ledger(ctx)
+	if err != nil {
+		return nil, err
+	}
+	a := &Analysis{Chain: c, Built: map[string][]string{}, Ledger: l, hist: h}
 	rep := &a.Report
-	rep.Root, rep.Verify, rep.Docs, rep.Blocks = c.Root, cfg.Verify, len(c.Docs), len(c.Blocks)
+	rep.Root, rep.Docs, rep.Blocks = c.Root, len(c.Docs), len(c.Blocks)
 	rep.Broken = append(rep.Broken, c.Missing...)
 	for _, o := range c.Orphans {
 		rep.Broken = append(rep.Broken, Finding{Path: o, Message: "the main document does not reach this document"})
 	}
-
-	// Acceptance: how each section's commands last went.
-	accepted := map[string]bool{}
-	for _, hash := range c.Order {
-		b := c.Blocks[hash]
-		if !b.IsAcceptance() {
-			continue
-		}
-		acc := Acceptance{Block: hash, Path: b.Path, Accepts: a.accepts(b)}
-		last := map[string]CommandResult{}
-		for _, w := range h.works {
-			for _, id := range w.Steps {
-				s := h.steps[id]
-				if s.Kind != StepCheck || (cfg.Verify == VerifyStrict && s.Runner != RunnerTig) || !h.reaches(c, s.Basis, hash) {
-					continue
-				}
-				res := CommandResult{Command: s.Command, Result: "failed", Runner: s.Runner, At: s.At, Step: s.ID}
-				if s.Passed() {
-					res.Result = "passed"
-				}
-				last[s.Command] = res
-			}
-		}
-		acc.Passed = len(b.Accept) > 0
-		for _, cmd := range b.Accept {
-			res, ok := last[cmd]
-			if !ok {
-				res, ok = last[""] // a check reported without its command counts for every command
-			}
-			if !ok {
-				res = CommandResult{Command: cmd, Result: "never"}
-			}
-			res.Command = cmd
-			acc.Passed = acc.Passed && res.Result == "passed"
-			acc.Commands = append(acc.Commands, res)
-		}
-		if len(b.Accept) == 0 {
-			rep.Open = append(rep.Open, Finding{Block: hash, Path: b.Path, Title: b.Title, Line: b.Start, Message: "the acceptance section has no commands"})
-		}
-		accepted[hash] = acc.Passed
-		rep.Acceptance = append(rep.Acceptance, acc)
-	}
-
-	// Every block with design is accepted by an acceptance section, handed on
-	// to detail documents, or covered by its sections.
-	a.accepted = accepted
-	covers := map[string]int{}
-	for _, hash := range c.Order {
-		if !c.isContent(hash) {
-			continue
-		}
-		a.status(hash, map[string]bool{})
-		if acc := a.Cover[hash]; acc != "" {
-			covers[acc]++
-		}
-		if acc, by := c.cover(hash); acc == "" && by == "" && len(c.sections(hash)) == 0 {
-			b := c.Blocks[hash]
-			rep.Open = append(rep.Open, Finding{Block: hash, Path: b.Path, Title: b.Title, Line: b.Start, Message: "no acceptance covers this block"})
-		}
-	}
-	for i := range rep.Acceptance {
-		rep.Acceptance[i].Covers = covers[rep.Acceptance[i].Block]
-	}
-	for _, doc := range c.Docs {
-		if doc == c.Root {
-			continue
-		}
-		if !a.hasAcceptance(doc) && a.hasOwnDesign(doc) {
-			rep.Open = append(rep.Open, Finding{Block: c.DocBlock[doc], Path: doc, Message: "the detail document has no acceptance"})
-		}
-		if !a.hasAcceptance(doc) && !a.hasOwnDesign(doc) && !a.handsOn(doc) {
-			rep.Open = append(rep.Open, Finding{Block: c.DocBlock[doc], Path: doc, Message: "the detail document is empty"})
-		}
-	}
-	for _, s := range a.Status {
-		switch s {
-		case StatusGuideline:
-			rep.Guidelines++
-		case StatusDirection:
-			rep.Directions++
-		}
-	}
-
 	a.footprint(ctx)
-	rep.Closed = len(rep.Broken) == 0 && len(rep.Open) == 0 && len(rep.Stale) == 0 && len(rep.Undesigned) == 0
+	rep.Closed = len(rep.Broken) == 0 && len(rep.Stale) == 0 && len(rep.Undesigned) == 0
 	return a, nil
-}
-
-// accepts is the title of what an acceptance section accepts.
-func (a *Analysis) accepts(b *Block) string {
-	if p := a.Chain.Blocks[b.Parent]; p != nil {
-		if p.Level == 0 {
-			return p.Path
-		}
-		return p.Title
-	}
-	return b.Path
-}
-
-func (a *Analysis) hasAcceptance(doc string) bool {
-	for _, h := range a.Chain.Order {
-		if b := a.Chain.Blocks[h]; b.Path == doc && b.IsAcceptance() {
-			return true
-		}
-	}
-	return false
-}
-
-// hasOwnDesign reports whether a document has design it does not hand on.
-func (a *Analysis) hasOwnDesign(doc string) bool {
-	for _, h := range a.Chain.Order {
-		if b := a.Chain.Blocks[h]; b.Path == doc && a.Chain.isContent(h) && !a.Chain.delegated(h) {
-			return true
-		}
-	}
-	return false
-}
-
-func (a *Analysis) handsOn(doc string) bool {
-	for _, h := range a.Chain.Order {
-		if b := a.Chain.Blocks[h]; b.Path == doc && len(a.Chain.Details[h]) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// status is a block's status, worked out once: from the acceptance section
-// that accepts it, from the detail documents it is handed on to, or from its
-// sections. Open when nothing covers it.
-func (a *Analysis) status(h string, seen map[string]bool) string {
-	if s, ok := a.Status[h]; ok {
-		return s
-	}
-	if seen[h] {
-		return StatusGuideline // documents that hand on to each other: the rest decides
-	}
-	seen[h] = true
-	c := a.Chain
-	s := StatusOpen
-	acc, by := c.cover(h)
-	switch {
-	case acc != "":
-		a.Cover[h] = acc
-		s = StatusDirection
-		if a.accepted[acc] {
-			s = StatusGuideline
-		}
-	case by != "":
-		s = a.detailStatus(by, seen)
-	default:
-		if kids := c.sections(h); len(kids) > 0 {
-			s = StatusGuideline
-			for _, k := range kids {
-				s = worse(s, a.status(k, seen))
-			}
-		}
-	}
-	a.Status[h] = s
-	return s
-}
-
-func worse(x, y string) string {
-	switch {
-	case x == StatusOpen || y == StatusOpen:
-		return StatusOpen
-	case x == StatusDirection || y == StatusDirection:
-		return StatusDirection
-	}
-	return StatusGuideline
-}
-
-// detailStatus is the status of what a block hands on: the worst status of
-// the design in the detail documents its own text links to.
-func (a *Analysis) detailStatus(by string, seen map[string]bool) string {
-	s := StatusGuideline
-	for _, doc := range a.Chain.Details[by] {
-		for _, h := range a.Chain.Order {
-			if a.Chain.Blocks[h].Path == doc && a.Chain.isContent(h) {
-				s = worse(s, a.status(h, seen))
-			}
-		}
-		if !a.hasAcceptance(doc) && !a.handsOn(doc) {
-			s = StatusOpen
-		}
-	}
-	return s
-}
-
-// reaches reports whether a step done for basis was done for block (or what
-// the block was before it changed).
-func (h *history) reaches(c *Chain, basis []string, block string) bool {
-	for _, b := range basis {
-		if b == block {
-			return true
-		}
-		for _, x := range h.current(c, b) {
-			if x == block {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // atEnd is what the blocks a work changed became by the time it ended (for
@@ -804,6 +554,8 @@ func (a *Analysis) atEnd(ctx context.Context, w Work) map[string][]string {
 func (a *Analysis) footprint(ctx context.Context) {
 	c, h, rep := a.Chain, a.hist, &a.Report
 	files, _ := c.src.list(ctx)
+	a.workFiles, a.workMarks, a.workBlocks = map[string][]string{}, map[string][]Mark{}, map[string][]string{}
+	a.commits = NewCommits(h.works)
 	type built struct {
 		basis string // the block hash the step was done for
 		hash  string // the file's content after the step ("" when deleted)
@@ -856,6 +608,9 @@ func (a *Analysis) footprint(ctx context.Context) {
 				}
 				content := after[ch.Path].Hash
 				lastTouch[ch.Path] = content
+				if w.ID != "" {
+					a.workFiles[w.ID] = appendNew(a.workFiles[w.ID], ch.Path)
+				}
 				for _, b := range s.Basis {
 					for _, e := range ended(b) {
 						for _, cur := range h.current(c, e) {
@@ -906,6 +661,7 @@ func (a *Analysis) footprint(ctx context.Context) {
 			}
 		}
 	}
+	a.footprintOfMarks(ctx, lastTouch, designed)
 	sort.Slice(rep.Stale, func(i, j int) bool {
 		return rep.Stale[i].Path+rep.Stale[i].Block < rep.Stale[j].Path+rep.Stale[j].Block
 	})
@@ -930,6 +686,164 @@ func (a *Analysis) footprint(ctx context.Context) {
 			continue
 		}
 		rep.Undesigned = append(rep.Undesigned, f)
+	}
+}
+
+// footprintOfMarks finds what each line means and follows it to its commits and
+// their files: what the commits built counts as built for the line's block, and
+// this finds where design and code have come apart.
+func (a *Analysis) footprintOfMarks(ctx context.Context, lastTouch map[string]string, designed map[string]bool) {
+	c, rep, l := a.Chain, &a.Report, a.Ledger
+	bound := map[string]bool{}
+	away := map[[2]string]bool{}
+	seen := map[spanKey]bool{}
+	type place struct {
+		block *Block
+		line  int
+	}
+	where := map[string]place{}
+	unsynced := map[string]bool{}
+	blocks := make([]*Block, 0, len(c.Order)+len(c.InferredBlocks))
+	for _, hash := range c.Order {
+		blocks = append(blocks, c.Blocks[hash])
+	}
+	blocks = append(blocks, c.InferredBlocks...)
+	inferredFrom := len(c.Order)
+	for bi, b := range blocks {
+		b.Marks = nil
+		for si := range b.Sentences {
+			s := &b.Sentences[si]
+			s.Inferred = bi >= inferredFrom
+			if s.Unsynced && s.Marked == "" {
+				rep.Stale = append(rep.Stale, Finding{Block: b.Hash, Path: b.Path, Title: b.Title, Line: s.Line, Code: FindUnsynced,
+					Message: "the line holds a mark in the old format; a sync converts it"})
+				continue
+			}
+			line := s.Hash
+			if s.Unsynced {
+				old, ok := l.resolveLine(s.Marked)
+				if !ok {
+					rep.Broken = append(rep.Broken, Finding{Block: b.Hash, Path: b.Path, Title: b.Title, Line: s.Line, Code: FindBrokenMark,
+						Message: fmt.Sprintf("the line's mark holds %s, a line nothing knows", s.Marked)})
+					continue
+				}
+				line = old
+			}
+			key := spanKey{line, s.N}
+			if seen[key] {
+				continue // a copy of a line: it has none of the first one's intents
+			}
+			seen[key] = true
+			var leaves []string
+			for _, i := range l.on(line, s.N) {
+				where[i.ID] = place{b, s.Line}
+				if s.Unsynced {
+					unsynced[i.ID] = true
+				}
+				var shorts []string
+				for _, e := range l.LinksOf(i.ID) {
+					w, err := a.commits.Resolve(e.Work)
+					if err != nil {
+						rep.Broken = append(rep.Broken, Finding{Block: b.Hash, Path: b.Path, Title: b.Title, Line: s.Line, Code: FindBrokenMark,
+							Message: fmt.Sprintf("the sentence names commit %s, which does not exist", e.Work)})
+						continue
+					}
+					if l.AcceptanceOf(w) == WorkRejected {
+						continue
+					}
+					shorts = appendNew(shorts, a.commits.ShowAs(w.ID))
+					bound[w.ID] = true
+					for _, leaf := range a.commits.Leaves(w.ID) {
+						bound[leaf] = true
+						leaves = appendNew(leaves, leaf)
+					}
+				}
+				for _, sp := range i.Spans {
+					if sp.Line != line || sp.N != s.N {
+						continue
+					}
+					ref := Ref{Kind: RefIntent, Code: i.Short[1:], Revision: i.Revision, Line: l.shortLine(line), HasRange: true, From: sp.From, To: sp.To}
+					if s.N > 1 {
+						ref.N = s.N
+					}
+					s.Intents = append(s.Intents, SentenceIntent{Ref: ref.String(), Short: i.Short, Text: i.Text, State: i.State, Revision: i.Revision,
+						Review: i.Review, By: i.By, Via: i.Via, From: sp.From, To: sp.To, Commits: shorts})
+				}
+				for _, short := range shorts {
+					s.IDs = appendNew(s.IDs, short)
+				}
+			}
+			if len(s.IDs) == 0 {
+				continue
+			}
+			rep.Marks++
+			m := Mark{Path: b.Path, Block: b.Hash, Line: s.Line, Text: s.Text, Hash: line, N: s.N, IDs: s.IDs}
+			b.Marks = append(b.Marks, m)
+			shown := map[string]bool{}
+			for _, ref := range s.IDs {
+				if w, err := a.commits.Resolve(ref); err == nil {
+					shown[w.ID] = true
+					bound[w.ID] = true
+					a.workMarks[w.ID] = append(a.workMarks[w.ID], m)
+					a.workBlocks[w.ID] = appendNew(a.workBlocks[w.ID], b.Hash)
+				}
+			}
+			for _, leaf := range leaves {
+				if !shown[leaf] {
+					a.workMarks[leaf] = append(a.workMarks[leaf], m)
+					a.workBlocks[leaf] = appendNew(a.workBlocks[leaf], b.Hash)
+				}
+				for _, f := range a.workFiles[leaf] {
+					now, ok := c.src.hash(ctx, f)
+					if !ok {
+						now = ""
+					}
+					designed[f] = true
+					if now != "" {
+						a.Built[b.Hash] = appendNew(a.Built[b.Hash], f)
+					}
+					if now != lastTouch[f] && !away[[2]string{b.Hash, f}] {
+						away[[2]string{b.Hash, f}] = true
+						msg := "the file changed outside any commit since these commits built it"
+						if now == "" {
+							msg = "the file these commits built is gone"
+						}
+						rep.Stale = append(rep.Stale, Finding{Block: b.Hash, Path: f, Title: b.Title, Line: s.Line, Code: FindCodeAway, Message: msg})
+					}
+				}
+			}
+		}
+	}
+	for _, i := range l.Intents() {
+		if !i.Active() {
+			continue
+		}
+		p, ok := where[i.ID]
+		if !ok {
+			if i.State == IntentConfirmed {
+				rep.Stale = append(rep.Stale, Finding{Code: FindIntentMissing, Message: "the line of a confirmed intent is no longer in any document: " + i.Short + " " + i.Text})
+			}
+			continue
+		}
+		links := l.LinksOf(i.ID)
+		followed := len(links) == 0
+		for _, e := range links {
+			followed = followed || e.Revision >= i.Revision
+		}
+		switch {
+		case len(links) > 0 && (unsynced[i.ID] || !followed):
+			rep.Stale = append(rep.Stale, Finding{Block: p.block.Hash, Path: p.block.Path, Title: p.block.Title, Line: p.line, Code: FindIntentChanged,
+				Message: "the sentence was reworded and no commit has followed it: " + i.Text})
+		case i.Review:
+			rep.Stale = append(rep.Stale, Finding{Block: p.block.Hash, Path: p.block.Path, Title: p.block.Title, Line: p.line, Code: FindReview,
+				Message: "the sentence changed and nobody has confirmed it since: " + i.Text})
+		}
+	}
+	for _, w := range a.commits.All() {
+		if bound[w.ID] || w.Result == ResultBaseline || w.Result == ResultRolledBack || w.Result == ResultAbandoned {
+			continue
+		}
+		rep.Unbound = append(rep.Unbound, a.commits.Short(w.ID))
 	}
 }
 
@@ -977,6 +891,11 @@ func (a *Analysis) Trail(hash string) []Work {
 }
 
 func (a *Analysis) touches(w Work, scope map[string]bool) bool {
+	for _, b := range a.workBlocks[w.ID] {
+		if scope[b] {
+			return true
+		}
+	}
 	bases := append([]string{}, w.Basis...)
 	for _, id := range w.Steps {
 		bases = append(bases, a.hist.steps[id].Basis...)

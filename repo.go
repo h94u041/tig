@@ -26,6 +26,12 @@ type Repo struct {
 	// Dir holds the heads, the config, the local cache and the lock (.tig).
 	// Empty: nothing persists but the objects, and there are no heads.
 	Dir string
+	// LedgerDir is where the ledger is; Dir/ledger when empty. A workspace keeps
+	// its heads to itself but writes the same ledger as the project.
+	LedgerDir string
+	// Session keeps this writer's work in progress apart from the others: several
+	// agents can work at once, each in its own session. Empty: the shared one.
+	Session string
 }
 
 // Open is the tig in root/.tig. It need not exist yet; Init creates it.
@@ -75,7 +81,11 @@ func (r *Repo) Init(cfg Config) error {
 		}
 	}
 	if _, err := os.Stat(filepath.Join(r.Dir, "config")); errors.Is(err, fs.ErrNotExist) {
-		return r.SetConfig(cfg)
+		if err := r.SetConfig(cfg); err != nil {
+			return err
+		}
+		// A new project: every work from here on waits for a decision.
+		return r.startLedger(nil)
 	}
 	return nil
 }
@@ -90,21 +100,17 @@ func (r *Repo) cacheDir() string {
 // Config is .tig/config.
 type Config struct {
 	Root    string   `json:"root"`              // the main document
-	Verify  string   `json:"verify"`            // loose (agents' reported checks count) or strict (only tig's own runs count)
 	Outside []string `json:"outside,omitempty"` // path prefixes that are not part of the chain
+	// Inferred is the document for sentences nobody has agreed with yet; next to
+	// the main document, inferred.md, when empty.
+	Inferred string `json:"inferred,omitempty"`
 }
-
-// Verification modes.
-const (
-	VerifyLoose  = "loose"
-	VerifyStrict = "strict"
-)
 
 const configHeader = "tig-config 1"
 
 // Config reads .tig/config; a project without one gets the defaults.
 func (r *Repo) Config() (Config, error) {
-	c := Config{Root: "README.md", Verify: VerifyLoose}
+	c := Config{Root: "README.md"}
 	if r.Dir == "" {
 		return c, nil
 	}
@@ -122,10 +128,8 @@ func (r *Repo) Config() (Config, error) {
 	if v := rec.get("root"); v != "" {
 		c.Root = v
 	}
-	if v := rec.get("verify"); v == VerifyStrict {
-		c.Verify = v
-	}
 	c.Outside = rec.all("outside")
+	c.Inferred = rec.get("inferred")
 	return c, nil
 }
 
@@ -133,11 +137,8 @@ func (r *Repo) Config() (Config, error) {
 func (r *Repo) SetConfig(c Config) error {
 	rec := newRecord(configHeader)
 	rec.set("root", c.Root)
-	if c.Verify != VerifyStrict {
-		c.Verify = VerifyLoose
-	}
-	rec.set("verify", c.Verify)
 	rec.setAll("outside", c.Outside)
+	rec.set("inferred", c.Inferred)
 	if err := os.MkdirAll(r.Dir, 0o755); err != nil {
 		return err
 	}

@@ -1,0 +1,9 @@
+ok  	github.com/h94u041/tig	13.693s
+?   	github.com/h94u041/tig/cmd/tighub	[no test files]
+ok  	github.com/h94u041/tig/cmd/tigprint	0.758s
+ok  	github.com/h94u041/tig/hub	1.013s
+--- FAIL: TestTools (0.02s)
+    server_test.go:103: tools: &{{complete} map[io.modelcontextprotocol/serverInfo:map[name:tig version:test]] {0 public}  [0x315af49a4100 0x315af49a4180 0x315af49a4300 0x315af49a4400 0x315af49a4500 0x315af49a4580 0x315af49a4600 0x315af49a4680 0x315af49a4700 0x315af49a4780 0x315af49a4800 0x315af49a4880 0x315af49a4980 0x315af49a4a80 0x315af49a4b00]} <nil>
+FAIL
+FAIL	github.com/h94u041/tig/mcpserver	4.620s
+FAIL

@@ -105,10 +105,10 @@ func (s *Server) pageIndex(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "index", rows)
 }
 
-// docRow is one document of the chain with how much of it is accepted.
+// docRow is one document of the chain.
 type docRow struct {
-	Path                         string
-	Guidelines, Directions, Open int
+	Path   string
+	Blocks int
 }
 
 func (s *Server) pageProject(w http.ResponseWriter, r *http.Request) {
@@ -123,14 +123,7 @@ func (s *Server) pageProject(w http.ResponseWriter, r *http.Request) {
 			if b.Path != d {
 				continue
 			}
-			switch b.Status {
-			case tig.StatusGuideline:
-				row.Guidelines++
-			case tig.StatusDirection:
-				row.Directions++
-			case tig.StatusOpen:
-				row.Open++
-			}
+			row.Blocks++
 		}
 		docs = append(docs, row)
 	}

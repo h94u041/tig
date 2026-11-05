@@ -1,0 +1,9 @@
+tig-step 1
+kind check
+basis 82402cdf3c539a32cb6f0caf0c36e7be56029dd5dc0ef19ded8dd8c72905638b
+command go test -run "Relations|Set|Groups" .
+exit 0
+output 453b7739a62c2bae63ace812af9c5196750414837f8652ed8c790df2837d3f6f
+runner tig
+actor claude
+at 2026-11-04T17:20:49.2011849Z

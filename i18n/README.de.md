@@ -9,6 +9,8 @@
 
 > Dies ist eine Übersetzung von [README.md](../README.md). Die englische Fassung ist das Original und die, die tig prüft; bei Abweichungen gilt sie.
 
+> **Hinweis:** Diese Übersetzung beschreibt noch das alte Markierungsformat und die Abnahme durch tig. Bis sie nachgezogen ist, gilt die englische Fassung.
+
 > Dieses tig ist nicht [tig, die Textoberfläche für Git](https://github.com/jonas/tig). Deshalb heißt sein Befehl `tigprint`.
 
 ## Warum tig

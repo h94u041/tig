@@ -1,0 +1,5 @@
+ok  	github.com/h94u041/tig	13.368s
+?   	github.com/h94u041/tig/cmd/tighub	[no test files]
+ok  	github.com/h94u041/tig/cmd/tigprint	0.960s
+ok  	github.com/h94u041/tig/hub	0.923s
+ok  	github.com/h94u041/tig/mcpserver	7.248s

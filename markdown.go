@@ -32,6 +32,9 @@ type Block struct {
 	Text    string   `json:"text"`   // its own text, without the heading line
 	Accept  []string `json:"accept,omitempty"`
 	Links   []string `json:"links,omitempty"` // link targets in its own text, as written
+	Marks   []Mark   `json:"marks,omitempty"` // its lines with work on them; an analysis fills these in
+	// Sentences is every line of its own text that is design (see relations.go).
+	Sentences []Sentence `json:"-"`
 }
 
 // IsAcceptance reports whether the block is an acceptance section: a heading
@@ -93,7 +96,7 @@ func ParseBlocks(path string, content []byte) []Block {
 			continue
 		}
 		level := len(m[1])
-		title := strings.TrimSpace(closingHash.ReplaceAllString(m[2], ""))
+		title := strings.TrimSpace(closingHash.ReplaceAllString(stripLineMarks(m[2]), ""))
 		if strings.Trim(m[2], "# \t") == "" {
 			title = ""
 		}
@@ -141,8 +144,18 @@ func ParseBlocks(path string, content []byte) []Block {
 		for ln := first; ln < s.ownEnd && ln < len(lines); ln++ {
 			own = append(own, strings.TrimRightFunc(lines[ln], unicode.IsSpace))
 		}
-		b.Text = trimBlankLines(own)
 		ownFenced := fenced[min(first, len(fenced)):min(s.ownEnd, len(fenced))]
+		// A mark is not design: the text, and so the hash, holds the plain sentence.
+		plain := make([]string, len(own))
+		for j, line := range own {
+			if j < len(ownFenced) && ownFenced[j] {
+				plain[j] = line
+			} else {
+				plain[j] = stripMarks(line)
+			}
+		}
+		b.Text = trimBlankLines(plain)
+		b.Sentences = sentencesIn(path, own, ownFenced, first+1)
 		b.Links = linksIn(own, ownFenced)
 		if b.IsAcceptance() {
 			b.Accept = commandsIn(own, ownFenced)
@@ -163,6 +176,10 @@ func ParseBlocks(path string, content []byte) []Block {
 		}
 		seen[blockHash(path, b.Heading, b.Text, 0)]++
 		b.Hash = h
+		for j := range b.Sentences {
+			b.Sentences[j].Block = h
+			b.Sentences[j].Heading = b.Heading
+		}
 		if s.parent >= 0 {
 			b.Parent = blocks[s.parent].Hash
 		}
