@@ -21,7 +21,7 @@ import (
 // Repo is one project's tig.
 type Repo struct {
 	Root    string   // the project folder
-	Skip    []string // folders a project without Git leaves out
+	Skip    []string // folder names a project without Git leaves out, and paths with a slash left out always
 	Objects Objects
 	// Dir holds the heads, the config, the local cache and the lock (.tig).
 	// Empty: nothing persists but the objects, and there are no heads.
@@ -104,6 +104,9 @@ type Config struct {
 	// Inferred is the document for sentences nobody has agreed with yet; next to
 	// the main document, inferred.md, when empty.
 	Inferred string `json:"inferred,omitempty"`
+	// UserName and UserBy are who acts in this project, ahead of the global config.
+	UserName string `json:"userName,omitempty"`
+	UserBy   string `json:"userBy,omitempty"`
 }
 
 const configHeader = "tig-config 1"
@@ -130,15 +133,21 @@ func (r *Repo) Config() (Config, error) {
 	}
 	c.Outside = rec.all("outside")
 	c.Inferred = rec.get("inferred")
+	c.UserName, c.UserBy = rec.get(keyUserName), rec.get(keyUserBy)
 	return c, nil
 }
 
 // SetConfig writes .tig/config.
 func (r *Repo) SetConfig(c Config) error {
+	if err := checkIdentity(c.UserName, c.UserBy); err != nil {
+		return err
+	}
 	rec := newRecord(configHeader)
 	rec.set("root", c.Root)
 	rec.setAll("outside", c.Outside)
 	rec.set("inferred", c.Inferred)
+	rec.set(keyUserName, c.UserName)
+	rec.set(keyUserBy, c.UserBy)
 	if err := os.MkdirAll(r.Dir, 0o755); err != nil {
 		return err
 	}

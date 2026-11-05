@@ -41,6 +41,10 @@ const (
 	ResultAbandoned  = "abandoned"
 	ResultFolded     = "folded"   // holds no changes of its own: it folds its children
 	ResultBaseline   = "baseline" // everything the project was before it joined tig
+	// ResultDescribed changed nothing: the files were already there, and it stands
+	// for what a line of a document says they do. It needs no acceptance; what
+	// needs deciding is whether the line and the files go together.
+	ResultDescribed = "described"
 )
 
 // RunnerTig marks a check tig ran itself, in records from when it ran them.

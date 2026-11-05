@@ -18,14 +18,31 @@ var defaultSkip = []string{".git", ".tig", "node_modules"}
 // (tracked ones that exist, and new ones .gitignore does not exclude);
 // otherwise every file, without the skipped folders. tig's own .tig is never
 // listed, and neither is a name a tree cannot hold (a backslash or a line
-// break in it).
+// break in it). A skip entry with a slash in it is a path from the root, and it
+// holds in a Git repository too: a tool can keep its own records in the project
+// without them counting as the project's files. An entry without one is a folder
+// name, for a project without Git.
 func Files(ctx context.Context, root string, skip []string) ([]string, error) {
+	var under []string
+	for _, d := range skip {
+		if strings.Contains(d, "/") {
+			under = append(under, strings.TrimSuffix(d, "/")+"/")
+		}
+	}
+	listed := func(rel string) bool {
+		for _, u := range under {
+			if strings.HasPrefix(rel, u) {
+				return false
+			}
+		}
+		return listable(rel)
+	}
 	if out, err := git(ctx, root, "rev-parse", "--is-inside-work-tree"); err == nil && strings.TrimSpace(string(out)) == "true" {
 		if out, err := git(ctx, root, "ls-files", "-co", "--exclude-standard", "-z"); err == nil {
 			var files []string
 			seen := map[string]bool{}
 			for _, rel := range strings.Split(string(out), "\x00") {
-				if rel == "" || seen[rel] || !listable(rel) {
+				if rel == "" || seen[rel] || !listed(rel) {
 					continue
 				}
 				seen[rel] = true
@@ -57,7 +74,7 @@ func Files(ctx context.Context, root string, skip []string) ([]string, error) {
 			}
 			return nil
 		}
-		if d.Type().IsRegular() && listable(rel) {
+		if d.Type().IsRegular() && listed(rel) {
 			files = append(files, rel)
 		}
 		return nil

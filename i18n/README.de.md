@@ -11,7 +11,7 @@
 
 > **Hinweis:** Diese Übersetzung beschreibt noch das alte Markierungsformat und die Abnahme durch tig. Bis sie nachgezogen ist, gilt die englische Fassung.
 
-> Dieses tig ist nicht [tig, die Textoberfläche für Git](https://github.com/jonas/tig). Deshalb heißt sein Befehl `tigprint`.
+> Dieses tig ist nicht [tig, die Textoberfläche für Git](https://github.com/jonas/tig). Deshalb heißt sein Befehl `tigwx`.
 
 ## Warum tig
 
@@ -45,13 +45,13 @@ Was tig nicht tut: Eine Abnahme ist nur so stark wie ihre Befehle, und im Modus 
 
 ## Funktionen
 
-- **Ein MCP-Server für Ihr Projekt.** `tigprint mcp` stellt die Dokumente und die Spur jedem MCP-Client bereit (Claude Code, Cursor und anderen): eine Übersicht, Stichwortsuche, Lesen und Verfolgen von Entwurfsblöcken, die Spur jedes Blocks und jeder Datei, die Geschlossenheitsprüfung und Werkzeuge, um neue Arbeit festzuhalten.
+- **Ein MCP-Server für Ihr Projekt.** `tigwx mcp` stellt die Dokumente und die Spur jedem MCP-Client bereit (Claude Code, Cursor und anderen): eine Übersicht, Stichwortsuche, Lesen und Verfolgen von Entwurfsblöcken, die Spur jedes Blocks und jeder Datei, die Geschlossenheitsprüfung und Werkzeuge, um neue Arbeit festzuhalten.
 - **Dokumente als eine Kette.** Das Hauptdokument, seine Detaildokumente und die Dateien, auf die sie verweisen, werden als ein Ganzes gelesen. Jeder Textblock ist nach seinem Inhalts-Hash benannt, und tig verfolgt jeden Block durch Bearbeitungen, Verschiebungen, Aufteilungen und Zusammenführungen nach festen, nachrechenbaren Regeln.
 - **Eine getreue Spur.** Jede *Work* (ein Bau, wie ein Commit) hält fest, für welchen Entwurf sie war, ihre Absicht, das Projekt davor und danach und ihre *Steps*: jede Bearbeitung mit genau den Dateien, die sie geändert hat, jeden Befehl, jede Prüfung und jede Entscheidung.
 - **Reproduktion auf Agentenebene.** Die Spur ist vollständig genug, dass ein zweiter Agent, der nur die Dokumente und die Spur bekommt, nachbauen kann, was der erste gebaut hat. Die Tests von tig selbst tun genau das.
 - **Geschlossenheitsprüfungen.** Defekte Links, Entwurf, den keine Abnahme abdeckt, Code, der außerhalb der Spur geändert oder von einer Entwurfsänderung zurückgelassen wurde, und Dateien, die kein Entwurf erreicht. Abgedeckter Entwurf ist eine *Direction*, bis seine Abnahme besteht, dann eine *Guideline*.
 - **Kontrolle darüber, was läuft.** tig führt nur die Befehle aus, die in Abnahmeabschnitten stehen, und über MCP nur, wenn Sie den Server mit `-run` starten. Im Modus `strict` zählen nur die Prüfungen, die tig selbst ausgeführt hat; ein Agent kann nicht einfach Erfolg melden.
-- **Ein Hub zum Veröffentlichen.** `tigprint push` sendet die Dokumente und die Kette, niemals den Code, an einen `tighub`, der jeden Push prüft und jedes Dokument Block für Block mit seinem Status zeigt.
+- **Ein Hub zum Veröffentlichen.** `tigwx push` sendet die Dokumente und die Kette, niemals den Code, an einen `tighub`, der jeden Push prüft und jedes Dokument Block für Block mit seinem Status zeigt.
 - **Sicher und portabel.** Objekte werden bei jedem Lesen gegen ihren Hash geprüft, Pfade aus fremden Bäumen können das Projekt nicht verlassen, und gleichzeitige Schreiber verlieren nie einen Datensatz. Das Format ist Klartext, versioniert und auf Dauer angelegt.
 
 ## Anwendungsfälle
@@ -64,10 +64,19 @@ Was tig nicht tut: Eine Abnahme ist nur so stark wie ihre Befehle, und im Modus 
 
 ## Installation
 
-Mit Go 1.25 oder neuer:
+Lade das Setup-Programm für dein System von den [Releases](https://github.com/h94u041/tig/releases) und starte es; mehr braucht es nicht. Unter Windows landet es in `%LOCALAPPDATA%\Programs\tigwx`, kommt in den PATH und erscheint in der Liste der installierten Programme. Anderswo landet es in `~/.local/bin` und nennt dir die Zeile, die du ergänzen musst, falls das nicht im PATH liegt. `-dir`, `-yes`, `-portable` und `-uninstall` tun, was sie sagen. Archive nur mit dem Programm und `SHA256SUMS` liegen am selben Ort. Das Setup-Programm ist noch nicht signiert, daher können Windows und macOS vor dem Start warnen.
+
+Oder mit Go 1.25 oder neuer:
 
 ```sh
-go install github.com/h94u041/tig/cmd/tigprint@latest
+go install github.com/h94u041/tig/cmd/tigwx@latest
+```
+
+Der Befehl heißt `tigwx`, weil `tig` schon der Name eines bekannten Git-Browsers ist, der oft mit Git installiert wird.
+
+```sh
+tigwx --version
+tigwx --help
 ```
 
 Der Hub ist ein eigener Befehl: `go install github.com/h94u041/tig/cmd/tighub@latest`.
@@ -77,10 +86,10 @@ Der Hub ist ein eigener Befehl: `go install github.com/h94u041/tig/cmd/tighub@la
 In einem Projekt, dessen Hauptdokument `README.md` ist:
 
 ```sh
-tigprint init              # hier .tig anlegen
-tigprint chain             # jeder Textblock der Kette und sein Status
-tigprint check             # ist die Kette geschlossen? (Exit-Status 1, wenn nicht)
-tigprint check -run-all    # tig jeden Abnahmeabschnitt selbst ausführen lassen
+tigwx init              # hier .tig anlegen
+tigwx chain             # jeder Textblock der Kette und sein Status
+tigwx check             # ist die Kette geschlossen? (Exit-Status 1, wenn nicht)
+tigwx check -run-all    # tig jeden Abnahmeabschnitt selbst ausführen lassen
 ```
 
 Ein Abschnitt mit dem Titel `Acceptance` listet die Befehle, die den Teil des Dokuments abnehmen, in dem er steht:
@@ -98,16 +107,16 @@ How a layer of the cube turns. Code: [turn.js](src/turn.js).
 Dann verbinden Sie Ihre Agenten. Für Claude Code:
 
 ```sh
-claude mcp add tig -- tigprint mcp
+claude mcp add tig -- tigwx mcp
 ```
 
 Oder in der Konfiguration eines beliebigen MCP-Clients:
 
 ```json
-{ "mcpServers": { "tig": { "command": "tigprint", "args": ["mcp"] } } }
+{ "mcpServers": { "tig": { "command": "tigwx", "args": ["mcp"] } } }
 ```
 
-`tigprint mcp` bedient das Projekt, in dem es gestartet wird (oder `-C dir`). Mit `-run` dürfen Agenten tig Abnahmebefehle ausführen lassen.
+`tigwx mcp` bedient das Projekt, in dem es gestartet wird (oder `-C dir`). Mit `-run` dürfen Agenten tig Abnahmebefehle ausführen lassen.
 
 ## Wie es funktioniert
 
@@ -123,15 +132,15 @@ Textblöcke, benannt nach ihrem Inhalts-Hash, ihre Herkunft von Schnappschuss zu
 
 ### MCP
 
-Die Werkzeuge und Ressourcen, die `tigprint mcp` Agenten gibt, wie ein Agent damit arbeitet und was sie sicher macht. Siehe [the MCP server](../docs/mcp.md).
+Die Werkzeuge und Ressourcen, die `tigwx mcp` Agenten gibt, wie ein Agent damit arbeitet und was sie sicher macht. Siehe [the MCP server](../docs/mcp.md).
 
 ### Hub
 
-`tigprint push` sendet die Dokumente und die Kette eines Projekts, und nichts sonst, an einen Hub, `tighub`, wo man sie liest wie ein Repository auf einem Git-Hoster. Siehe [the hub](../docs/hub.md).
+`tigwx push` sendet die Dokumente und die Kette eines Projekts, und nichts sonst, an einen Hub, `tighub`, wo man sie liest wie ein Repository auf einem Git-Hoster. Siehe [the hub](../docs/hub.md).
 
 ## Befehle
 
-`tigprint` allein listet jeden Befehl und seine Optionen. Der Code liegt in [cmd/tigprint](../cmd/tigprint/).
+`tigwx` allein listet jeden Befehl und seine Optionen. Der Code liegt in [cmd/tigwx](../cmd/tigwx/).
 
 | Befehl | Was er tut |
 |---|---|

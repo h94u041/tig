@@ -1,0 +1,259 @@
+package tig
+
+import (
+	"context"
+	"fmt"
+	"strings"
+)
+
+// What a reference's intent is now compared with the documents.
+const (
+	SyncOK         = "ok"         // the line says what the ledger knows
+	SyncUnsynced   = "unsynced"   // the text is not what its mark holds
+	SyncReview     = "review"     // an edit reached it and nobody has confirmed it since
+	SyncSuperseded = "superseded" // it no longer stands
+	SyncMissing    = "missing"    // no document holds its line
+)
+
+// RefView is the one answer to "what is this reference?", for people and for
+// agents alike.
+type RefView struct {
+	Ref    string      `json:"ref"`
+	Kind   string      `json:"kind"`
+	Intent *IntentView `json:"intent,omitempty"`
+	Line   *LineView   `json:"line,omitempty"`
+	Work   *WorkView   `json:"work,omitempty"`
+	Event  *EventView  `json:"event,omitempty"`
+}
+
+// IntentView is an intent at a revision.
+type IntentView struct {
+	Short    string `json:"short"`
+	State    string `json:"state"`
+	Revision int    `json:"revision"` // the one asked for
+	Current  int    `json:"current"`  // the latest
+	Text     string `json:"text"`
+	By       string `json:"by,omitempty"`
+	Via      string `json:"via,omitempty"`
+	Actor    string `json:"actor,omitempty"`
+	// Places are where it is in the documents now.
+	Places []Place        `json:"places,omitempty"`
+	Works  []WorkOfIntent `json:"works,omitempty"`
+	// Previous is the revision before it, with why it changed.
+	Previous *Previous `json:"previous,omitempty"`
+	From     []string  `json:"from,omitempty"`
+	Sync     string    `json:"sync"`
+}
+
+// Place is a range of a line in a document.
+type Place struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Ref  string `json:"ref"`
+}
+
+// WorkOfIntent is a work on an intent.
+type WorkOfIntent struct {
+	Short      string `json:"short"`
+	Kind       string `json:"kind"`
+	Revision   int    `json:"revision"`
+	Acceptance string `json:"acceptance"`
+	// State is whether this code goes with the intent: LinkProposed or LinkConfirmed.
+	State  string `json:"state"`
+	By     string `json:"by,omitempty"`
+	Via    string `json:"via,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// Previous is an earlier revision.
+type Previous struct {
+	Ref    string `json:"ref"`
+	Text   string `json:"text"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// LineView is a line by its hash.
+type LineView struct {
+	Hash    string   `json:"hash"`
+	Text    string   `json:"text"`
+	Range   string   `json:"range,omitempty"` // the part of the text a range names
+	Parent  string   `json:"parent,omitempty"`
+	Places  []Place  `json:"places,omitempty"`
+	Intents []string `json:"intents,omitempty"`
+}
+
+// WorkView is a commit with its place in the ledger.
+type WorkView struct {
+	CommitView
+	Acceptance string `json:"acceptance"`
+	// Decision is who decided and why; none when nobody has.
+	Decision *Acceptance `json:"decision,omitempty"`
+	Intents  []string    `json:"intents,omitempty"`
+}
+
+// EventView is one event of an intent.
+type EventView struct {
+	IntentEvent
+	Short string `json:"short"` // the intent's short ID
+}
+
+// Show answers a reference.
+func (r *Repo) Show(ctx context.Context, ref string) (RefView, error) {
+	p, err := ParseRef(ref)
+	if err != nil {
+		return RefView{}, err
+	}
+	a, err := r.Analyze(ctx, "")
+	if err != nil {
+		return RefView{}, err
+	}
+	out := RefView{Ref: ref, Kind: p.Kind}
+	switch p.Kind {
+	case RefIntent:
+		out.Intent, err = a.showIntent(ctx, p)
+	case RefLine:
+		out.Line, err = a.showLine(ctx, r, p)
+	case RefWork:
+		out.Work, err = a.showWork(p)
+	case RefEvent:
+		out.Event, err = a.showEvent(p)
+	}
+	return out, err
+}
+
+// sentences walks every line the analysis read, the inferred document last.
+func (a *Analysis) sentences(do func(s *Sentence)) {
+	for _, h := range a.Chain.Order {
+		b := a.Chain.Blocks[h]
+		for i := range b.Sentences {
+			do(&b.Sentences[i])
+		}
+	}
+	for _, b := range a.Chain.InferredBlocks {
+		for i := range b.Sentences {
+			do(&b.Sentences[i])
+		}
+	}
+}
+
+func (a *Analysis) showIntent(_ context.Context, p Ref) (*IntentView, error) {
+	l := a.Ledger
+	i, err := l.Intent("i" + p.Code)
+	if err != nil {
+		return nil, err
+	}
+	rev := p.Revision
+	if rev == 0 {
+		rev = i.Revision
+	}
+	e, ok := i.RevisionEvent(rev)
+	if !ok {
+		return nil, fmt.Errorf("tig: %s has no revision %d", i.Short, rev)
+	}
+	v := &IntentView{Short: i.Short, State: i.State, Revision: rev, Current: i.Revision, Text: e.Text, By: i.By, Via: i.Via, Actor: i.Actor, From: i.From}
+	unsynced := false
+	a.sentences(func(s *Sentence) {
+		for _, it := range s.Intents {
+			if it.Short == i.Short {
+				v.Places = append(v.Places, Place{Path: s.Path, Line: s.Line, Ref: it.Ref})
+				unsynced = unsynced || s.Unsynced
+			}
+		}
+	})
+	for _, link := range l.LinksOf(i.ID) {
+		w, err := a.commits.Resolve(link.Work)
+		if err != nil {
+			v.Works = append(v.Works, WorkOfIntent{Short: link.Work, Kind: link.Kind, Revision: link.Revision, State: l.LinkState(link), By: link.By, Via: link.Via, Reason: link.Reason})
+			continue
+		}
+		v.Works = append(v.Works, WorkOfIntent{Short: a.commits.Short(w.ID), Kind: link.Kind, Revision: link.Revision, Acceptance: l.AcceptanceOf(w), State: l.LinkState(link), By: link.By, Via: link.Via, Reason: link.Reason})
+	}
+	if rev > 1 {
+		if prev, ok := i.RevisionEvent(rev - 1); ok {
+			v.Previous = &Previous{Ref: fmt.Sprintf("%s#%d", i.Short, rev-1), Text: prev.Text, Reason: e.Reason}
+		}
+	}
+	switch {
+	case !i.Active():
+		v.Sync = SyncSuperseded
+	case len(v.Places) == 0:
+		v.Sync = SyncMissing
+	case unsynced:
+		v.Sync = SyncUnsynced
+	case i.Review:
+		v.Sync = SyncReview
+	default:
+		v.Sync = SyncOK
+	}
+	return v, nil
+}
+
+func (a *Analysis) showLine(ctx context.Context, r *Repo, p Ref) (*LineView, error) {
+	l := a.Ledger
+	hash, ok := l.resolveLine(p.Code)
+	if !ok {
+		return nil, fmt.Errorf("tig: no line %q", p.Code)
+	}
+	data, err := r.Objects.GetObject(ctx, hash)
+	if err != nil {
+		return nil, fmt.Errorf("tig: the text of line %s is gone: %w", hash[:minLineShort], err)
+	}
+	n := max(p.N, 1)
+	v := &LineView{Hash: hash, Text: string(data), Parent: l.parents[hash]}
+	if p.HasRange {
+		v.Range = sliceRunes(v.Text, p.From, p.To)
+	}
+	a.sentences(func(s *Sentence) {
+		if s.Hash == hash && s.N == n {
+			v.Places = append(v.Places, Place{Path: s.Path, Line: s.Line, Ref: "l" + l.shortLine(hash)})
+		}
+	})
+	for _, i := range l.on(hash, n) {
+		v.Intents = append(v.Intents, i.Short)
+	}
+	return v, nil
+}
+
+func (a *Analysis) showWork(p Ref) (*WorkView, error) {
+	c, err := a.Commit(p.Code)
+	if err != nil {
+		return nil, err
+	}
+	v := &WorkView{CommitView: c, Acceptance: a.Ledger.AcceptanceOf(c.Work)}
+	if d, ok := a.Ledger.Decision(c.Work.ID); ok {
+		v.Decision = &d
+	}
+	for _, i := range a.Ledger.Intents() {
+		for _, e := range a.Ledger.LinksOf(i.ID) {
+			if e.Work == c.ID {
+				v.Intents = appendNew(v.Intents, fmt.Sprintf("%s#%d", i.Short, e.Revision))
+			}
+		}
+	}
+	return v, nil
+}
+
+func (a *Analysis) showEvent(p Ref) (*EventView, error) {
+	var found *IntentEvent
+	for id, e := range a.Ledger.events {
+		if strings.HasPrefix(id, p.Code) {
+			if found != nil {
+				return nil, fmt.Errorf("tig: ev%s matches more than one event", p.Code)
+			}
+			e := e
+			found = &e
+		}
+	}
+	if found == nil {
+		return nil, fmt.Errorf("tig: no event ev%s", p.Code)
+	}
+	id := found.Intent
+	if id == "" {
+		id = found.ID
+	}
+	short := ""
+	if i := a.Ledger.intents[id]; i != nil {
+		short = i.Short
+	}
+	return &EventView{IntentEvent: *found, Short: short}, nil
+}

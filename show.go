@@ -58,6 +58,11 @@ type WorkOfIntent struct {
 	Kind       string `json:"kind"`
 	Revision   int    `json:"revision"`
 	Acceptance string `json:"acceptance"`
+	// State is whether this code goes with the intent: LinkProposed or LinkConfirmed.
+	State  string `json:"state"`
+	By     string `json:"by,omitempty"`
+	Via    string `json:"via,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // Previous is an earlier revision.
@@ -80,8 +85,10 @@ type LineView struct {
 // WorkView is a commit with its place in the ledger.
 type WorkView struct {
 	CommitView
-	Acceptance string   `json:"acceptance"`
-	Intents    []string `json:"intents,omitempty"`
+	Acceptance string `json:"acceptance"`
+	// Decision is who decided and why; none when nobody has.
+	Decision *Acceptance `json:"decision,omitempty"`
+	Intents  []string    `json:"intents,omitempty"`
 }
 
 // EventView is one event of an intent.
@@ -156,10 +163,10 @@ func (a *Analysis) showIntent(_ context.Context, p Ref) (*IntentView, error) {
 	for _, link := range l.LinksOf(i.ID) {
 		w, err := a.commits.Resolve(link.Work)
 		if err != nil {
-			v.Works = append(v.Works, WorkOfIntent{Short: link.Work, Kind: link.Kind, Revision: link.Revision})
+			v.Works = append(v.Works, WorkOfIntent{Short: link.Work, Kind: link.Kind, Revision: link.Revision, State: l.LinkState(link), By: link.By, Via: link.Via, Reason: link.Reason})
 			continue
 		}
-		v.Works = append(v.Works, WorkOfIntent{Short: a.commits.Short(w.ID), Kind: link.Kind, Revision: link.Revision, Acceptance: l.AcceptanceOf(w)})
+		v.Works = append(v.Works, WorkOfIntent{Short: a.commits.Short(w.ID), Kind: link.Kind, Revision: link.Revision, Acceptance: l.AcceptanceOf(w), State: l.LinkState(link), By: link.By, Via: link.Via, Reason: link.Reason})
 	}
 	if rev > 1 {
 		if prev, ok := i.RevisionEvent(rev - 1); ok {
@@ -213,6 +220,9 @@ func (a *Analysis) showWork(p Ref) (*WorkView, error) {
 		return nil, err
 	}
 	v := &WorkView{CommitView: c, Acceptance: a.Ledger.AcceptanceOf(c.Work)}
+	if d, ok := a.Ledger.Decision(c.Work.ID); ok {
+		v.Decision = &d
+	}
 	for _, i := range a.Ledger.Intents() {
 		for _, e := range a.Ledger.LinksOf(i.ID) {
 			if e.Work == c.ID {

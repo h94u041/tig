@@ -44,6 +44,8 @@ func New(r *tig.Repo, opts Options) *mcp.Server {
 	mcp.AddTool(s, &mcp.Tool{Name: "fold_commits", Description: "Fold commits under a new parent commit when a sentence has gathered too many: lines then show the parent. Nothing disappears: the children keep their records and their IDs."}, h.foldCommits)
 	mcp.AddTool(s, &mcp.Tool{Name: "resolve", Description: "What a reference means. i7f3a is an intent as it stands, i7f3a#2 a fixed revision of it, lc3d4e5:5-14 a range of a line, a1b2 a work, ev91c0 an event. You get the state, the text, where it is, the works on it with whether each was accepted, the revision before it, and whether the documents still agree."}, h.resolveRef)
 	mcp.AddTool(s, &mcp.Tool{Name: "sync_lines", Description: "Bring the ledger up to the documents after lines were edited: they get their new hash, intents an edit reached are asked about again, and intents it did not reach just move. Marks in the old format are converted."}, h.syncLines)
+	mcp.AddTool(s, &mcp.Tool{Name: "reverse_marks", Description: "Which lines of the documents seem to be about which files, by what the lines point at: links, inline code naming files or symbols, section titles that are folder names. It follows fixed rules and writes nothing. You also get the lines and files nothing was found for: read those yourself, and say what you find with describe_sentence."}, h.reverseMarks)
+	mcp.AddTool(s, &mcp.Tool{Name: "describe_sentence", Description: "Say that a line of a document, or part of it, is about files already there. Nothing changes in the code. It is recorded as your proposal and binds nothing until someone agrees, and only a person decides that."}, h.describeSentence)
 	mcp.AddTool(s, &mcp.Tool{Name: "propose_link", Description: "Propose that a text block belongs with a file or another block. It is recorded as inferred, not observed."}, h.proposeLink)
 	for _, kind := range []string{"block", "work", "step", "object"} {
 		s.AddResourceTemplate(&mcp.ResourceTemplate{Name: kind, URITemplate: "tig://" + kind + "/{hash}", MIMEType: mimeOf(kind),
@@ -55,6 +57,8 @@ func New(r *tig.Repo, opts Options) *mcp.Server {
 const instructions = `This server is a project's tig: its documents as one chain (the main document, the detail documents it links to, their text blocks) and the footprint of how the project was built (commits, called works, and their steps). A line of a document ends in a mark, <tig l="c3d4e5"/>, and the ledger says what it means: intents over ranges of it, which may overlap, and the commits that follow each. Leave the marks where they are when you edit a line.
 
 Before changing the project: overview, then read_block and follow the blocks your change is about, and trail them to see how they were built. Then start_work with those blocks as the basis, record_step as you go (edit after you change files, check after you run a check), and finish_work. Then bind what you did to the design with mark_sentence. Run check to see whether the chain is still closed: it also says where a sentence or its code has moved without the other. A sentence you add that the main document does not say goes into the inferred document, and only a person confirms it: never write your guess as if it had been agreed. Whether your work is accepted is decided by whoever takes it.
+
+When a project already has code and documents that nothing connects, call reverse_marks to see what the lines point at, and say what else you find with describe_sentence. Both only propose.
 
 Agents working at the same time each pass their own session to start_work, record_step and finish_work, and keep to their own files or their own copy of the project.
 
@@ -614,11 +618,31 @@ type markIn struct {
 	Commits  []string `json:"commits" jsonschema:"the commits it binds to (short IDs, hashes or prefixes)"`
 	Doc      string   `json:"doc,omitempty" jsonschema:"the document (default: the main document)"`
 	Under    string   `json:"under,omitempty" jsonschema:"the title of the section a new sentence goes under"`
+	Why      string   `json:"why,omitempty" jsonschema:"why the commits follow it"`
 }
 
 func (h handlers) markSentence(ctx context.Context, req *mcp.CallToolRequest, in markIn) (*mcp.CallToolResult, tig.Mark, error) {
-	m, err := h.r.Mark(ctx, tig.MarkInput{Path: in.Doc, Sentence: in.Sentence, Under: in.Under, IDs: in.Commits, Inferred: true, By: tig.ByAI, Via: tig.ViaBuilder, Actor: actor(req, "")})
+	m, err := h.r.Mark(ctx, tig.MarkInput{Path: in.Doc, Sentence: in.Sentence, Under: in.Under, IDs: in.Commits, Inferred: true, Link: tig.LinkProposed, By: tig.ByAI, Via: tig.ViaAgent, Reason: in.Why, Actor: actor(req, "")})
 	return nil, m, err
+}
+
+func (h handlers) reverseMarks(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, tig.ReverseResult, error) {
+	res, err := h.r.Reverse(ctx)
+	return nil, res, err
+}
+
+type describeIn struct {
+	Sentence string   `json:"sentence" jsonschema:"the line, or the part of it, in the document's own words; one no document says goes into the inferred document"`
+	Files    []string `json:"files" jsonschema:"the files already there that it is about"`
+	Doc      string   `json:"doc,omitempty" jsonschema:"the document (default: the main document)"`
+	Under    string   `json:"under,omitempty" jsonschema:"the title of the section a new sentence goes under"`
+	Line     int      `json:"line,omitempty" jsonschema:"the 1-based line, to tell apart lines that say the same"`
+	Why      string   `json:"why" jsonschema:"why the line goes with those files"`
+}
+
+func (h handlers) describeSentence(ctx context.Context, req *mcp.CallToolRequest, in describeIn) (*mcp.CallToolResult, tig.Described, error) {
+	d, err := h.r.Describe(ctx, tig.DescribeInput{Path: in.Doc, Sentence: in.Sentence, Under: in.Under, Line: in.Line, Files: in.Files, Link: tig.LinkProposed, By: tig.ByAI, Via: tig.ViaAgent, Actor: actor(req, ""), Reason: in.Why})
+	return nil, d, err
 }
 
 type foldIn struct {

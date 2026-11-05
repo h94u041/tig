@@ -1,5 +1,5 @@
 // Command tighub is a hub: it keeps the documents and chains projects push to
-// it with tigprint push, and shows them.
+// it with tigwx push, and shows them.
 package main
 
 import (

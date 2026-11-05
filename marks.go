@@ -75,15 +75,25 @@ type MarkInput struct {
 	IDs []string
 	// LinkKind is how they follow it; implements when empty.
 	LinkKind string
-	// Inferred: the sentence is someone's guess. If the main document does not
-	// say it already, it goes into the inferred document until a person agrees.
-	// If it does, what the document says stands as confirmed.
+	// Inferred: the sentence is someone's guess. If the document does not say it
+	// already, it goes into the inferred document until a person agrees. If it
+	// does, the words are the document's and the guess is only that these commits
+	// follow them: nobody is taken to have confirmed anything.
 	Inferred bool
 	// State is what a new intent starts as: IntentConfirmed, or proposed when empty.
 	State string
+	// Link is what the links start as: LinkConfirmed or LinkProposed. Empty means
+	// confirmed when a person says it (By is ByHuman), proposed otherwise.
+	Link  string
 	By    string
 	Via   string
 	Actor string
+	// Reason says why, on the links.
+	Reason string
+	// Line, when above 0, is the 1-based line meant, and Sentence is what it says
+	// or part of it. It tells apart lines that say the same thing. If the line no
+	// longer says that, the sentence is looked for as usual.
+	Line int
 }
 
 func fencedLines(lines []string) []bool {
@@ -132,6 +142,22 @@ func locate(lines []string, fenced []bool, sentence string) (at, from, to int, o
 		}
 	}
 	return 0, 0, 0, false
+}
+
+// locateAt is locate, except that a line asked for by number is the one found if
+// it still says that.
+func locateAt(lines []string, fenced []bool, sentence string, line int) (at, from, to int, ok bool) {
+	if i := line - 1; i >= 0 && i < len(lines) && !fenced[i] && !isHeading(lines[i]) && isTrackedLine(lines[i]) {
+		text, want := LineText(lines[i]), LineText(sentence)
+		if text == want {
+			return i, 0, len([]rune(want)), true
+		}
+		if byteAt := strings.Index(text, want); byteAt >= 0 {
+			from = len([]rune(text[:byteAt]))
+			return i, from, from + len([]rune(want)), true
+		}
+	}
+	return locate(lines, fenced, sentence)
 }
 
 func checkSentence(sentence string) (string, error) {
@@ -506,12 +532,13 @@ func (r *Repo) migrateLine(ctx context.Context, l *Ledger, used map[spanKey]bool
 				return 0, line, err
 			}
 		}
+		// The old mark was how a commit was bound: the binding stands as it did.
 		for _, id := range strings.Fields(line[loc[4]:loc[5]]) {
 			work := id
 			if w, err := commits.Resolve(id); err == nil {
 				work = w.ID
 			}
-			if err := r.addLink(l, LinkEvent{Work: work, Intent: i.ID, Revision: i.Revision, Kind: LinkImplements, Actor: actor}); err != nil {
+			if err := r.addLink(l, LinkEvent{Work: work, Intent: i.ID, Revision: i.Revision, Kind: LinkImplements, State: LinkConfirmed, Via: ViaMigrated, Actor: actor}); err != nil {
 				return 0, line, err
 			}
 		}
@@ -579,9 +606,7 @@ func (r *Repo) Mark(ctx context.Context, in MarkInput) (Mark, error) {
 			return Mark{}, err
 		}
 		lines := strings.Split(string(data), "\n")
-		if _, _, _, found := locate(lines, fencedLines(lines), sentence); found {
-			in.State, in.By, in.Via = IntentConfirmed, ByHuman, ViaDirect
-		} else {
+		if _, _, _, found := locate(lines, fencedLines(lines), sentence); !found {
 			in.Path = cfg.InferredDoc()
 		}
 	}
@@ -590,7 +615,7 @@ func (r *Repo) Mark(ctx context.Context, in MarkInput) (Mark, error) {
 		return Mark{}, err
 	}
 	lines := strings.Split(string(data), "\n")
-	at, from, to, found := locate(lines, fencedLines(lines), sentence)
+	at, from, to, found := locateAt(lines, fencedLines(lines), sentence, in.Line)
 	if !found {
 		data = insertLine(in.Path, data, sentence, in.Under)
 		lines = strings.Split(string(data), "\n")
@@ -651,12 +676,26 @@ func (r *Repo) Mark(ctx context.Context, in MarkInput) (Mark, error) {
 	if kind == "" {
 		kind = LinkImplements
 	}
+	state := in.Link
+	if state == "" {
+		state = LinkProposed
+		if in.By == ByHuman {
+			state = LinkConfirmed
+		}
+	}
 	have := l.LinksOf(i.ID)
+	rejected := l.RejectedLinks(i.ID)
 	for _, w := range works {
-		if slices.ContainsFunc(have, func(x LinkEvent) bool { return x.Work == w && x.Revision == i.Revision && x.Kind == kind }) {
+		if slices.ContainsFunc(have, func(x LinkEvent) bool {
+			return x.Work == w && x.Revision == i.Revision && x.Kind == kind && (state != LinkConfirmed || x.State == LinkConfirmed)
+		}) {
 			continue
 		}
-		if err := r.addLink(l, LinkEvent{Work: w, Intent: i.ID, Revision: i.Revision, Kind: kind, Actor: in.Actor}); err != nil {
+		// What someone turned down is not proposed again; only a decision brings it back.
+		if state == LinkProposed && slices.ContainsFunc(rejected, func(x LinkEvent) bool { return x.Work == w }) {
+			continue
+		}
+		if err := r.addLink(l, LinkEvent{Work: w, Intent: i.ID, Revision: i.Revision, Kind: kind, State: state, By: in.By, Via: in.Via, Actor: in.Actor, Reason: in.Reason}); err != nil {
 			return Mark{}, err
 		}
 	}

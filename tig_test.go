@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -243,5 +244,29 @@ func TestExecutableBitIsKept(t *testing.T) {
 	}
 	if fi, _ := os.Stat(filepath.Join(root, "run.sh")); fi.Mode()&0o111 == 0 {
 		t.Fatal("the script lost its executable bit")
+	}
+}
+
+// A skip entry with a slash is a path from the root and holds in a Git repository too.
+func TestFilesSkipsAPath(t *testing.T) {
+	for _, withGit := range []bool{false, true} {
+		root := t.TempDir()
+		for _, f := range []string{"a.txt", "records/r.json", "keep/records/x.txt"} {
+			p := filepath.Join(root, filepath.FromSlash(f))
+			os.MkdirAll(filepath.Dir(p), 0o755)
+			os.WriteFile(p, []byte("x"), 0o644)
+		}
+		if withGit {
+			if out, err := exec.Command("git", "-C", root, "init").CombinedOutput(); err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+		}
+		files, err := tig.Files(context.Background(), root, []string{"records/"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(files, ",") != "a.txt,keep/records/x.txt" {
+			t.Errorf("git %v: %v", withGit, files)
+		}
 	}
 }

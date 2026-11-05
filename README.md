@@ -7,7 +7,7 @@
 
 **English** · [繁體中文](i18n/README.zh-TW.md) · [Deutsch](i18n/README.de.md) · [Français](i18n/README.fr.md) · [Русский](i18n/README.ru.md) · [日本語](i18n/README.ja.md)
 
-> This tig is not [tig, the text-mode interface for Git](https://github.com/jonas/tig). That is why its command is called `tigprint`.
+> This tig is not [tig, the text-mode interface for Git](https://github.com/jonas/tig). That is why its command is called `tigwx`.
 
 ## Why tig
 
@@ -41,14 +41,14 @@ What tig does not do: it runs no checks and passes no verdicts, and a check an a
 
 ## Features
 
-- **An MCP server for your project.** `tigprint mcp` serves the documents and the footprint to any MCP client (Claude Code, Cursor and others): an overview, keyword search, reading and following blocks of design, the footprint of each block or file, the closure check, what any reference means, and tools to record new work.
+- **An MCP server for your project.** `tigwx mcp` serves the documents and the footprint to any MCP client (Claude Code, Cursor and others): an overview, keyword search, reading and following blocks of design, the footprint of each block or file, the closure check, what any reference means, and tools to record new work.
 - **Documents as one chain.** The main document, its detail documents and the files they link to are read as one whole. Every text block is named by its content hash, and tig follows each block through edits, moves, splits and merges by fixed, recomputable rules.
 - **Lines bound to code.** A line of a document carries a mark, `The cube turns one layer at a time. <tig l="c3d4e5"/>`, invisible in any Markdown viewer. The ledger holds the rest: the intents on that line, each with its range of characters, any number of them overlapping, and the commits following each. Edit the line and it gets a new hash; only the intents the edit reached need another look. When a line or its code moves without the other, `check` says so.
 - **A faithful footprint.** Each *work* (one construction, like a commit) records the design it was for, its intent, the project before and after, and its *steps*: every edit with exactly the files it changed, every command, check and decision.
 - **Agent-level reproduction.** The footprint is complete enough that a second agent, given only the documents and the footprint, can rebuild what the first one built. tig's own tests do exactly that.
 - **Closure checks.** Broken links and marks, confirmed intents waiting for another look, code changed outside the footprint or left behind by a design change, and files no design reaches.
 - **Decisions on record.** Each intent is proposed, confirmed, revised or retired by someone, by a person or by an AI, and each commit is a candidate until it is accepted or rejected. The events are append-only and merge by union. tig runs nothing.
-- **A hub to publish to.** `tigprint push` sends the documents and the chain, never the code, to a `tighub`, which checks every push and shows each document block by block.
+- **A hub to publish to.** `tigwx push` sends the documents and the chain, never the code, to a `tighub`, which checks every push and shows each document block by block.
 - **Safe and portable.** Objects are verified against their hashes on every read, paths from other people's trees cannot escape the project, and concurrent writers never lose a record. The format is plain text, versioned and meant to last.
 
 ## Use cases
@@ -61,10 +61,19 @@ What tig does not do: it runs no checks and passes no verdicts, and a check an a
 
 ## Install
 
-With Go 1.25 or later:
+Get the setup program for your system from [Releases](https://github.com/h94u041/tig/releases) and run it; it needs nothing else. On Windows it goes to `%LOCALAPPDATA%\Programs\tigwx`, joins your PATH and shows up in your list of installed programs. Elsewhere it goes to `~/.local/bin` and tells you the line to add if that is not on your PATH. `-dir`, `-yes`, `-portable` and `-uninstall` do what they say. Archives holding only the program, and `SHA256SUMS`, are in the same place. The setup program is not signed yet, so Windows and macOS may warn you before running it.
+
+Or with Go 1.25 or later:
 
 ```sh
-go install github.com/h94u041/tig/cmd/tigprint@latest
+go install github.com/h94u041/tig/cmd/tigwx@latest
+```
+
+The command is `tigwx` because `tig` is already the name of a well-known Git browser, often installed along with Git.
+
+```sh
+tigwx --version
+tigwx --help
 ```
 
 The hub is a separate command: `go install github.com/h94u041/tig/cmd/tighub@latest`.
@@ -74,11 +83,11 @@ The hub is a separate command: `go install github.com/h94u041/tig/cmd/tighub@lat
 In a project whose main document is `README.md`:
 
 ```sh
-tigprint init              # start .tig here
-tigprint chain             # every text block of the chain
-tigprint check             # is the chain closed? (exit status 1 when not)
-tigprint mark -confirm "A layer of the cube turns."   # say what a line means
-tigprint show i7f3a        # what any reference means
+tigwx init              # start .tig here
+tigwx chain             # every text block of the chain
+tigwx check             # is the chain closed? (exit status 1 when not)
+tigwx mark -confirm "A layer of the cube turns."   # say what a line means
+tigwx show i7f3a        # what any reference means
 ```
 
 Marking a line writes a small mark at its end and an intent in the ledger:
@@ -92,16 +101,16 @@ A layer of the cube turns. <tig l="c3d4e5"/>
 Then connect your agents. For Claude Code:
 
 ```sh
-claude mcp add tig -- tigprint mcp
+claude mcp add tig -- tigwx mcp
 ```
 
 Or in any MCP client's configuration:
 
 ```json
-{ "mcpServers": { "tig": { "command": "tigprint", "args": ["mcp"] } } }
+{ "mcpServers": { "tig": { "command": "tigwx", "args": ["mcp"] } } }
 ```
 
-`tigprint mcp` serves the project it is started in (or `-C dir`).
+`tigwx mcp` serves the project it is started in (or `-C dir`).
 
 ## How it works
 
@@ -117,28 +126,30 @@ Text blocks named by content hash, line marks, intents and references, the chain
 
 ### MCP
 
-The tools and resources `tigprint mcp` gives agents, how an agent works with them, and what keeps them safe. See [the MCP server](docs/mcp.md).
+The tools and resources `tigwx mcp` gives agents, how an agent works with them, and what keeps them safe. See [the MCP server](docs/mcp.md).
 
 ### Hub
 
-`tigprint push` sends a project's documents and chain, and nothing else, to a hub, `tighub`, where people read them as they read a repository on a Git host. See [the hub](docs/hub.md).
+`tigwx push` sends a project's documents and chain, and nothing else, to a hub, `tighub`, where people read them as they read a repository on a Git host. See [the hub](docs/hub.md).
 
 ## Commands
 
-`tigprint` alone lists every command and its flags. The code is in [cmd/tigprint](cmd/tigprint/).
+`tigwx` alone lists every command and its flags. Every command but `mcp` takes `-json`. The code is in [cmd/tigwx](cmd/tigwx/).
 
 | Command | What it does |
 |---|---|
-| `init` | start a tig in this folder (`-root` the main document) |
+| `init` | start a tig in this folder (`-root` the main document); it asks nothing and records no commit. `-force`: the code there is one commit and every line goes with it |
 | `snap`, `log`, `diff`, `restore` | snapshots: take one, list them, compare, put files back |
 | `blocks <file.md>` | a document's text blocks and their hashes |
 | `chain` | every block of the chain |
 | `show <block or reference>` | one block, or what a reference means: `i7f3a`, `i7f3a#2`, `lc3d4e5:5-14`, `a1b2`, `ev91c0` |
 | `search <words>` | blocks, works, steps and files containing every word |
-| `check` | the closure report; `-json` |
+| `check` | the closure report |
 | `trail <block or file>` | the works done for it; `-steps` for each step and the files it changed |
 | `work start`, `work step`, `work finish` | leave a footprint by hand |
 | `mark`, `sync`, `unmark` | say what a line means; bring the ledger up to edited lines; withdraw undone commits |
+| `reverse`, `describe`, `link` | find which lines are about which files, with no model; say a line is about files already there; decide whether code goes with an intent |
+| `set`, `groups` | what a piece of work needs; what belongs together |
 | `confirm`, `reject`, `retire`, `accept` | record a decision on an intent or a commit |
 | `mcp` | serve this tig over MCP on stdin and stdout |
 | `push [-token t] [-m note] <url>` | send the documents and the chain to a hub |
@@ -147,7 +158,7 @@ A block is named by its content hash; any unique prefix of 8 or more characters 
 
 ## Format
 
-The `.tig` folder holds plain text objects and records, versioned, so other tools can read and write it too. See [the format](docs/format.md).
+The `.tig` folder holds plain text objects and records, versioned, so other tools can read and write it too. See [the format](docs/format.md), and [building on tig](docs/tools.md) for using it from your own tool.
 
 ## Status
 

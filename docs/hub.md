@@ -1,6 +1,6 @@
 # Hub
 
-A hub keeps projects' documents and chains where people can read them, the way a Git host keeps repositories. `tigprint push` sends a project to a hub; the hub, `tighub`, takes only what the chain is made of and shows it. Code: [hub](../hub/), [cmd/tighub](../cmd/tighub/).
+A hub keeps projects' documents and chains where people can read them, the way a Git host keeps repositories. `tigwx push` sends a project to a hub; the hub, `tighub`, takes only what the chain is made of and shows it. Code: [hub](../hub/), [cmd/tighub](../cmd/tighub/).
 
 ## What is pushed
 
@@ -8,9 +8,9 @@ A push carries the documents and the chain, and nothing else:
 
 - the **documents**: the main document, every detail document the chain reaches, and `README.md` when there is one, as they were in the latest snapshot;
 - the **chain**: every block of those documents, the detail documents it hands on to, and the paths of the files it links to and the footprint built for it;
-- the **closure report**, as `tigprint check` gives it.
+- the **closure report**, as `tigwx check` gives it.
 
-The project's other files are never sent: the hub knows their paths, not their contents. Neither are the snapshots, works and steps of the footprint, nor the ledger: a hub shows the lines' marks but not yet what they mean. The chain carries what the footprint concluded. The documents come from the latest snapshot, so `tigprint push` says so when documents changed after it.
+The project's other files are never sent: the hub knows their paths, not their contents. Neither are the snapshots, works and steps of the footprint, nor the ledger: a hub shows the lines' marks but not yet what they mean. The chain carries what the footprint concluded. The documents come from the latest snapshot, so `tigwx push` says so when documents changed after it.
 
 ## Publications
 
@@ -31,7 +31,7 @@ The tree and the objects are those of [the format](format.md): content-addressed
 
 ## Pushing
 
-`tigprint push <url>` takes the hub's address of the project, `http://host/owner/name`, or `$TIG_HUB`; the token is `-token` or `$TIG_TOKEN`. Like `git push`:
+`tigwx push <url>` takes the hub's address of the project, `http://host/owner/name`, or `$TIG_HUB`; the token is `-token` or `$TIG_TOKEN`. Like `git push`:
 
 1. it asks the hub for the project's head;
 2. it builds the publication on top of that head, and stops when the documents and the chain are what the head already has;

@@ -1,0 +1,300 @@
+package main
+
+import (
+	"encoding/json"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+	"testing"
+)
+
+// tj runs a command with -json and decodes what it answers.
+func tj[T any](t *testing.T, dir string, args ...string) T {
+	t.Helper()
+	// Flags go after the command, and after the subcommand of work.
+	at := 1
+	if args[0] == "work" {
+		at = 2
+	}
+	full := slices.Concat(args[:at], []string{"-json"}, args[at:])
+	code, out := tp(t, dir, full...)
+	var v T
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("%v: exit %d, not JSON: %v\n%s", full, code, err, out)
+	}
+	return v
+}
+
+// A tool that knows nothing else about tig can use all of it: the whole flow, from
+// the command line alone, in its own words for who and how.
+func TestAnotherToolUsesTig(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "README.md", "# Shop\n\nCarts are kept in [the cart](src/cart.go). Prices come from `PriceOf`.\n\nReceipts are printed.\n\nNobody wrote this down yet.\n")
+	write(t, dir, "src/cart.go", "package src\n")
+	write(t, dir, "src/price.go", "package src\nfunc PriceOf() {}\n")
+	write(t, dir, "src/printer.go", "package src\n")
+
+	// init asks nothing, records no commit, and leaves the documents alone.
+	before, _ := os.ReadFile(filepath.Join(dir, "README.md"))
+	if code, out := tp(t, dir, "init"); code != 0 {
+		t.Fatal(out)
+	}
+	if commits := tj[[]map[string]any](t, dir, "commits"); len(commits) != 0 {
+		t.Fatalf("%+v", commits)
+	}
+	if after, _ := os.ReadFile(filepath.Join(dir, "README.md")); string(after) != string(before) {
+		t.Fatalf("%s", after)
+	}
+
+	// The rules find what the lines point at.
+	type candidate struct {
+		Line  int      `json:"line"`
+		Text  string   `json:"text"`
+		Files []string `json:"files"`
+		Score int      `json:"score"`
+	}
+	type reverse struct {
+		Candidates []candidate      `json:"candidates"`
+		OpenLines  []map[string]any `json:"openLines"`
+		OpenFiles  []string         `json:"openFiles"`
+		Written    []map[string]any `json:"written"`
+	}
+	found := tj[reverse](t, dir, "reverse")
+	if len(found.Candidates) != 2 || found.Candidates[0].Files[0] != "src/cart.go" || found.Candidates[1].Files[0] != "src/price.go" {
+		t.Fatalf("%+v", found)
+	}
+	if len(found.OpenFiles) != 1 || found.OpenFiles[0] != "src/printer.go" || len(found.OpenLines) != 2 {
+		t.Fatalf("%+v", found)
+	}
+
+	// It writes them as its own proposals, in its own word.
+	written := tj[reverse](t, dir, "reverse", "-write", "-by", "shopbot", "-via", "nightly-scan")
+	if len(written.Written) != 2 {
+		t.Fatalf("%+v", written)
+	}
+	type link struct {
+		Commit string   `json:"commit"`
+		State  string   `json:"state"`
+		By     string   `json:"by"`
+		Via    string   `json:"via"`
+		Files  []string `json:"files"`
+	}
+	type intent struct {
+		Short string `json:"short"`
+		State string `json:"state"`
+		By    string `json:"by"`
+		Via   string `json:"via"`
+		Links []link `json:"links"`
+	}
+	type sentence struct {
+		Text    string   `json:"text"`
+		IDs     []string `json:"ids"`
+		Intents []intent `json:"intents"`
+	}
+	type set struct {
+		Sentences []sentence `json:"sentences"`
+		Files     []string   `json:"files"`
+	}
+	first := tj[set](t, dir, "set", "-s", "Carts are kept in [the cart](src/cart.go). Prices come from `PriceOf`.")
+	if len(first.Sentences) != 1 || len(first.Sentences[0].Intents) != 2 {
+		t.Fatalf("%+v", first)
+	}
+	cart := first.Sentences[0].Intents[0]
+	if cart.By != "shopbot" || cart.Via != "nightly-scan" || cart.State != "proposed" || cart.Links[0].State != "proposed" || cart.Links[0].By != "shopbot" {
+		t.Fatalf("%+v", cart)
+	}
+	if len(first.Sentences[0].IDs) != 0 {
+		t.Fatalf("a proposal binds nothing: %+v", first.Sentences[0])
+	}
+
+	// Its person agrees with one and turns down the other.
+	if code, out := tp(t, dir, "link", "-by", "alice", "-via", "review-board", "-m", "yes", cart.Short, cart.Links[0].Commit); code != 0 {
+		t.Fatal(out)
+	}
+	price := first.Sentences[0].Intents[1]
+	if code, out := tp(t, dir, "link", "-reject", "-by", "alice", price.Short, price.Links[0].Commit); code != 0 {
+		t.Fatal(out)
+	}
+	type show struct {
+		Kind   string `json:"kind"`
+		Intent struct {
+			State string `json:"state"`
+			Sync  string `json:"sync"`
+			Works []struct {
+				Short string `json:"short"`
+				State string `json:"state"`
+				By    string `json:"by"`
+				Via   string `json:"via"`
+			} `json:"works"`
+		} `json:"intent"`
+	}
+	v := tj[show](t, dir, "show", cart.Short)
+	if v.Kind != "intent" || v.Intent.Works[0].State != "confirmed" || v.Intent.Works[0].By != "alice" || v.Intent.Works[0].Via != "review-board" {
+		t.Fatalf("%+v", v)
+	}
+	if v := tj[show](t, dir, "show", price.Short); len(v.Intent.Works) != 0 {
+		t.Fatalf("%+v", v)
+	}
+
+	// Its own agent does a piece of work and records it.
+	if code, out := tp(t, dir, "work", "start", "-m", "print receipts"); code != 0 {
+		t.Fatal(out)
+	}
+	write(t, dir, "src/printer.go", "package src\n// prints\n")
+	if code, out := tp(t, dir, "work", "step", "-kind", "edit", "-m", "prints"); code != 0 {
+		t.Fatal(out)
+	}
+	type finished struct {
+		ID     string `json:"id"`
+		Result string `json:"result"`
+	}
+	work := tj[finished](t, dir, "work", "finish", "-result", "done")
+	if work.Result != "done" {
+		t.Fatalf("%+v", work)
+	}
+	var m struct {
+		Path string   `json:"path"`
+		IDs  []string `json:"ids"`
+	}
+	m = tj[struct {
+		Path string   `json:"path"`
+		IDs  []string `json:"ids"`
+	}](t, dir, "mark", "-id", work.ID[:8], "-inferred", "-by", "shopbot", "-via", "agent-7", "Receipts are printed.")
+	if m.Path != "README.md" || len(m.IDs) != 1 {
+		t.Fatalf("%+v", m)
+	}
+	receipts := tj[set](t, dir, "set", "-s", "Receipts are printed.").Sentences[0].Intents[0]
+	if receipts.State != "proposed" || receipts.Via != "agent-7" || receipts.Links[0].State != "proposed" {
+		t.Fatalf("nobody agreed yet: %+v", receipts)
+	}
+	guess := tj[struct {
+		Path string `json:"path"`
+	}](t, dir, "mark", "-inferred", "-by", "shopbot", "-via", "agent-7", "-under", "Guesses", "Prices are in cents.")
+	if guess.Path != "inferred.md" {
+		t.Fatalf("%+v", guess)
+	}
+
+	// The commit waits for a decision; a decision carries its links.
+	type commitLine struct {
+		Short      string `json:"short"`
+		Acceptance string `json:"acceptance"`
+		Result     string `json:"result"`
+	}
+	commits := tj[[]commitLine](t, dir, "commits")
+	if len(commits) != 3 || commits[0].Acceptance != "candidate" || commits[0].Result != "done" || commits[1].Result != "described" || commits[1].Acceptance != "accepted" {
+		t.Fatalf("%+v", commits)
+	}
+	if code, out := tp(t, dir, "accept", "-by", "alice", "-via", "review-board", work.ID[:8]); code != 0 {
+		t.Fatal(out)
+	}
+	if got := tj[set](t, dir, "set", "-s", "Receipts are printed.").Sentences[0].Intents[0]; got.Links[0].State != "confirmed" || got.State != "proposed" {
+		t.Fatalf("%+v", got)
+	}
+
+	// Editing a line follows through, and only what the edit reached is asked again.
+	if code, out := tp(t, dir, "confirm", "-by", "alice", cart.Short); code != 0 {
+		t.Fatal(out)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "README.md"))
+	write(t, dir, "README.md", strings.Replace(string(data), "Prices come from", "Prices are read from", 1))
+	type sync struct {
+		Touched []string `json:"touched"`
+		Moved   []string `json:"moved"`
+	}
+	synced := tj[sync](t, dir, "sync")
+	if len(synced.Touched) != 1 || synced.Touched[0] != price.Short {
+		t.Fatalf("%+v", synced)
+	}
+	if v := tj[show](t, dir, "show", cart.Short); v.Intent.State != "confirmed" || v.Intent.Sync != "ok" {
+		t.Fatalf("%+v", v)
+	}
+
+	// Every query answers in JSON, including the ones nothing above needed.
+	blocks := tj[[]map[string]any](t, dir, "chain")
+	if len(blocks) == 0 {
+		t.Fatal("no blocks")
+	}
+	hash := blocks[0]["hash"].(string)
+	if v := tj[map[string]any](t, dir, "show", hash); v["kind"] != "block" {
+		t.Fatalf("%+v", v)
+	}
+	tj[[]map[string]any](t, dir, "log")
+	tj[[]map[string]any](t, dir, "blocks", filepath.Join(dir, "README.md"))
+	tj[[]map[string]any](t, dir, "search", "receipts")
+	tj[[]map[string]any](t, dir, "trail", "-steps", "src/printer.go")
+	tj[map[string]any](t, dir, "commit", work.ID[:8])
+	tj[map[string]any](t, dir, "work", "status")
+	tj[map[string]any](t, dir, "check")
+	tj[[]map[string]any](t, dir, "groups")
+	tj[map[string]string](t, dir, "version")
+	tj[map[string]any](t, dir, "snap")
+	tj[[]map[string]any](t, dir, "diff")
+}
+
+// One word and everything goes with one commit.
+func TestInitForceFromTheCommandLine(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "README.md", "# A\n\nOne line.\n")
+	write(t, dir, "a.go", "a\n")
+	var out struct {
+		Force struct {
+			Created bool `json:"created"`
+			Lines   int  `json:"lines"`
+		} `json:"force"`
+	}
+	out = tj[struct {
+		Force struct {
+			Created bool `json:"created"`
+			Lines   int  `json:"lines"`
+		} `json:"force"`
+	}](t, dir, "init", "-force", "-by", "someone")
+	if !out.Force.Created || out.Force.Lines != 1 {
+		t.Fatalf("%+v", out)
+	}
+	code, text := tp(t, dir, "commits")
+	if code != 0 || !strings.Contains(text, "baseline") {
+		t.Fatal(text)
+	}
+}
+
+// tig has no product above it in its code: every value that says how something
+// came about is the caller's own.
+func TestNothingAboveTigInItsCode(t *testing.T) {
+	root := filepath.Join("..", "..")
+	banned := regexp.MustCompile(`(?i)tealprint|暢通|施工`)
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == ".git" || d.Name() == ".tig") {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			// A tree written before tig had its own name still has to read.
+			if banned.MatchString(line) && !strings.Contains(line, "oldTreeHeader") {
+				t.Errorf("%s: %s", p, line)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gomod, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if banned.Match(gomod) {
+		t.Errorf("go.mod:\n%s", gomod)
+	}
+}

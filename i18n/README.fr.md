@@ -11,7 +11,7 @@
 
 > **Remarque :** cette traduction décrit encore l'ancien format de marques et la validation par tig. En attendant sa mise à jour, la version anglaise fait foi.
 
-> Ce tig n'est pas [tig, l'interface texte pour Git](https://github.com/jonas/tig). C'est pourquoi sa commande s'appelle `tigprint`.
+> Ce tig n'est pas [tig, l'interface texte pour Git](https://github.com/jonas/tig). C'est pourquoi sa commande s'appelle `tigwx`.
 
 ## Pourquoi tig
 
@@ -45,13 +45,13 @@ Ce que tig ne fait pas : une recette ne vaut que par ses commandes, et en mode `
 
 ## Fonctionnalités
 
-- **Un serveur MCP pour votre projet.** `tigprint mcp` sert les documents et l'empreinte à n'importe quel client MCP (Claude Code, Cursor et d'autres) : une vue d'ensemble, la recherche par mots-clés, la lecture et le suivi des blocs de conception, l'empreinte de chaque bloc ou fichier, la vérification de fermeture et des outils pour enregistrer un nouveau travail.
+- **Un serveur MCP pour votre projet.** `tigwx mcp` sert les documents et l'empreinte à n'importe quel client MCP (Claude Code, Cursor et d'autres) : une vue d'ensemble, la recherche par mots-clés, la lecture et le suivi des blocs de conception, l'empreinte de chaque bloc ou fichier, la vérification de fermeture et des outils pour enregistrer un nouveau travail.
 - **Les documents comme une seule chaîne.** Le document principal, ses documents de détail et les fichiers vers lesquels ils renvoient sont lus comme un tout. Chaque bloc de texte est nommé par le hachage de son contenu, et tig suit chaque bloc à travers les modifications, déplacements, scissions et fusions selon des règles fixes et recalculables.
 - **Une empreinte fidèle.** Chaque *work* (une construction, comme un commit) enregistre la conception qu'elle servait, son intention, le projet avant et après, et ses *steps* : chaque modification avec exactement les fichiers qu'elle a changés, chaque commande, vérification et décision.
 - **Une reproduction à l'échelle de l'agent.** L'empreinte est assez complète pour qu'un second agent, avec seulement les documents et l'empreinte, reconstruise ce que le premier a construit. Les propres tests de tig font exactement cela.
 - **Vérifications de fermeture.** Liens cassés, conception qu'aucune recette ne couvre, code modifié en dehors de l'empreinte ou laissé en arrière par un changement de conception, et fichiers qu'aucune conception n'atteint. Une conception couverte est une *direction* jusqu'à ce que sa recette passe, puis une *guideline*.
 - **La maîtrise de ce qui s'exécute.** tig n'exécute que les commandes écrites dans les sections de recette, et via MCP seulement si vous démarrez le serveur avec `-run`. En mode `strict`, seules comptent les vérifications que tig a lui-même exécutées ; un agent ne peut pas simplement annoncer un succès.
-- **Un hub où publier.** `tigprint push` envoie les documents et la chaîne, jamais le code, à un `tighub`, qui vérifie chaque envoi et affiche chaque document bloc par bloc avec son statut.
+- **Un hub où publier.** `tigwx push` envoie les documents et la chaîne, jamais le code, à un `tighub`, qui vérifie chaque envoi et affiche chaque document bloc par bloc avec son statut.
 - **Sûr et portable.** Les objets sont vérifiés contre leur hachage à chaque lecture, les chemins venant des arbres d'autrui ne peuvent pas sortir du projet, et des écritures concurrentes ne perdent jamais d'enregistrement. Le format est du texte brut, versionné et fait pour durer.
 
 ## Cas d'usage
@@ -64,10 +64,19 @@ Ce que tig ne fait pas : une recette ne vaut que par ses commandes, et en mode `
 
 ## Installation
 
-Avec Go 1.25 ou plus récent :
+Téléchargez le programme d'installation de votre système depuis les [Releases](https://github.com/h94u041/tig/releases) et lancez-le ; il ne demande rien d'autre. Sous Windows, il va dans `%LOCALAPPDATA%\Programs\tigwx`, rejoint votre PATH et apparaît dans la liste des programmes installés. Ailleurs, il va dans `~/.local/bin` et vous donne la ligne à ajouter si ce dossier n'est pas dans votre PATH. `-dir`, `-yes`, `-portable` et `-uninstall` font ce qu'ils disent. Des archives contenant seulement le programme, et `SHA256SUMS`, sont au même endroit. Le programme d'installation n'est pas encore signé : Windows et macOS peuvent vous avertir avant de le lancer.
+
+Ou avec Go 1.25 ou plus récent :
 
 ```sh
-go install github.com/h94u041/tig/cmd/tigprint@latest
+go install github.com/h94u041/tig/cmd/tigwx@latest
+```
+
+La commande s'appelle `tigwx` parce que `tig` est déjà le nom d'un navigateur Git connu, souvent installé avec Git.
+
+```sh
+tigwx --version
+tigwx --help
 ```
 
 Le hub est une commande à part : `go install github.com/h94u041/tig/cmd/tighub@latest`.
@@ -77,10 +86,10 @@ Le hub est une commande à part : `go install github.com/h94u041/tig/cmd/tighub@
 Dans un projet dont le document principal est `README.md` :
 
 ```sh
-tigprint init              # créer .tig ici
-tigprint chain             # chaque bloc de texte de la chaîne et son statut
-tigprint check             # la chaîne est-elle fermée ? (code de sortie 1 sinon)
-tigprint check -run-all    # faire exécuter chaque section de recette par tig lui-même
+tigwx init              # créer .tig ici
+tigwx chain             # chaque bloc de texte de la chaîne et son statut
+tigwx check             # la chaîne est-elle fermée ? (code de sortie 1 sinon)
+tigwx check -run-all    # faire exécuter chaque section de recette par tig lui-même
 ```
 
 Une section intitulée `Acceptance` liste les commandes qui recettent la partie du document où elle se trouve :
@@ -98,16 +107,16 @@ How a layer of the cube turns. Code: [turn.js](src/turn.js).
 Connectez ensuite vos agents. Pour Claude Code :
 
 ```sh
-claude mcp add tig -- tigprint mcp
+claude mcp add tig -- tigwx mcp
 ```
 
 Ou dans la configuration de n'importe quel client MCP :
 
 ```json
-{ "mcpServers": { "tig": { "command": "tigprint", "args": ["mcp"] } } }
+{ "mcpServers": { "tig": { "command": "tigwx", "args": ["mcp"] } } }
 ```
 
-`tigprint mcp` sert le projet dans lequel il est lancé (ou `-C dir`). Ajoutez `-run` pour laisser les agents faire exécuter les commandes de recette par tig.
+`tigwx mcp` sert le projet dans lequel il est lancé (ou `-C dir`). Ajoutez `-run` pour laisser les agents faire exécuter les commandes de recette par tig.
 
 ## Fonctionnement
 
@@ -123,15 +132,15 @@ Les blocs de texte nommés par le hachage de leur contenu, leur filiation d'un i
 
 ### MCP
 
-Les outils et ressources que `tigprint mcp` donne aux agents, la façon dont un agent s'en sert, et ce qui les rend sûrs. Voir [the MCP server](../docs/mcp.md).
+Les outils et ressources que `tigwx mcp` donne aux agents, la façon dont un agent s'en sert, et ce qui les rend sûrs. Voir [the MCP server](../docs/mcp.md).
 
 ### Hub
 
-`tigprint push` envoie les documents et la chaîne d'un projet, et rien d'autre, à un hub, `tighub`, où l'on les lit comme on lit un dépôt sur un hébergeur Git. Voir [the hub](../docs/hub.md).
+`tigwx push` envoie les documents et la chaîne d'un projet, et rien d'autre, à un hub, `tighub`, où l'on les lit comme on lit un dépôt sur un hébergeur Git. Voir [the hub](../docs/hub.md).
 
 ## Commandes
 
-`tigprint` seul liste chaque commande et ses options. Le code se trouve dans [cmd/tigprint](../cmd/tigprint/).
+`tigwx` seul liste chaque commande et ses options. Le code se trouve dans [cmd/tigwx](../cmd/tigwx/).
 
 | Commande | Ce qu'elle fait |
 |---|---|

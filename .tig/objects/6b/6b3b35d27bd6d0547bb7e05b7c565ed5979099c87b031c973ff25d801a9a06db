@@ -1,0 +1,2205 @@
+// Command tigwx keeps a project's tig: snapshots of the project, the
+// footprint of how it was built, and the chain of its documents, which it
+// checks and serves to agents over MCP.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"runtime/debug"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/h94u041/tig"
+	"github.com/h94u041/tig/hub"
+	"github.com/h94u041/tig/mcpserver"
+)
+
+// version is set when a release is built; otherwise it comes from how Go built
+// this, and fallbackVersion is for a build that knows nothing.
+var version = ""
+
+const fallbackVersion = "0.1.0"
+
+// versionString is the version with no leading v.
+func versionString() string {
+	v := version
+	if v == "" {
+		if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			v = info.Main.Version
+		}
+	}
+	if v == "" {
+		v = fallbackVersion
+	}
+	return strings.TrimPrefix(v, "v")
+}
+
+const usage = `tigwx keeps a project's tig: the footprint of how the project was built
+and the chain of its documents, checked and served to agents over MCP.
+
+Usage: tigwx [-C dir] [-actor name] [-session name] [--version] [--help] <command> [arguments]
+
+Every command but mcp takes -json and answers in JSON instead. Flags may go before
+or after the other arguments; -- ends them. Decisions and marks take -by (human,
+ai, tool, or your own word; default user.by, or human) and -via (your own word for
+how it came about; default direct), and tig keeps what it is told.
+
+Exit status: 0 done; 1 the answer is no (check not closed, config key not set,
+unknown command); 128 it could not be done; 129 it was asked for wrongly.
+
+Project
+  init [-root README.md] [-outside path,...] [-force]    start a tig in this folder; it asks nothing and records
+                                                         no commit. -force: the code there is one commit, and
+                                                         every line of the documents goes with it
+  status                                                 where this project stands; it only reads
+  config [-global] <key> [value]                         read or set user.name, user.by, root, inferred, outside
+  config [-global] -list | -unset <key>                  every value set, or take one away. user.* are also global
+  snap [-reason why]                                     record the project as it is
+  log [-n 20]                                            the snapshots, newest first
+  diff [from [to]]                                       what changed (default: the last snapshot and now)
+  restore [-all] <snapshot> [path...]                    put files back as they were in a snapshot
+
+Chain
+  blocks <file.md>                                       a document's text blocks and their hashes
+  chain                                                  every block of the chain
+  show <block|reference>                                 one block: its text, details and what was built for it; or
+                                                         what a reference means: i7f3a, i7f3a#2, lc3d4e5:5-14, a1b2, ev91c0
+  search <words>                                         blocks, works, steps and files containing every word
+  check                                                  is the chain closed? (exit status 1 when not)
+
+Footprint
+  trail [-steps] [-n 20] <block|file>                    the works done for a block or a file
+  work start -m intent [block...]                        start a work
+  work step -kind kind [-m note] [-command c] [-exit n] [-output file] [block...]
+                                                         record a step of it (kind: edit, command,
+                                                         install, check, decision, note)
+  work finish [-result r] [-approver name,...]           finish it
+  work status                                            the work in progress
+  commits [-n 20]                                        the commits, newest first, by short ID
+  commit <id>                                            one commit: its files, its sentences, what it folds
+  set [-s sentence] [-i i7f3a] [-id a1b2] [-f file]...   what a piece of work needs: sentences, commits, files
+  groups                                                 the sentences, commits and files that belong together
+
+Marks
+  mark [-id a1b2,c3d4] [-doc f.md] [-under title] [-inferred] [-propose] [-confirm] <sentence>
+                                                         say what a line or a part of it means, and which commits
+                                                         follow it. -inferred: a guess, for the inferred document
+                                                         unless the document says it already. -propose: the
+                                                         commits only may follow it. -confirm: it is what was meant
+  reverse [-min n] [-write]                              which lines seem to be about which files, by what they
+                                                         point at, with no model. -write: propose them
+  describe -f file... [-doc f.md] [-under title] [-line n] [-m intent] [-why why] [-propose] <sentence>
+                                                         a line is about files already there; nothing changes
+  link [-reject] [-m why] <intent> <id>                  whether this code goes with this intent
+  sync                                                   bring the ledger up to edited lines; old marks are converted
+  confirm [-under title] [-m why] <intent>               it is what was meant; out of the inferred document if there
+  reject [-m why] <intent>                               it is not what was meant
+  retire [-for i1a2b] [-m why] <intent>                  it no longer stands, or another took its place
+  accept [-reject] [-m why] <id>                         record a decision on a commit; tig judges nothing
+  fold -m intent <id> <id>...                            fold commits under a new one; none disappear
+  unmark <id>...                                         withdraw undone commits from what they followed; the sentences stay
+  baseline -m intent                                     one commit for all the project was before tig
+
+Agents
+  mcp                                                    serve this tig over MCP on stdin and stdout
+
+Hub
+  push [-token t] [-m note] <url>                        send the documents and the chain to a hub
+                                                         (url http://host/owner/name, or $TIG_HUB;
+                                                         the token is -token or $TIG_TOKEN)
+
+Help
+  help [-a] [command]                                    this, one command, or (-a) every command and those on PATH
+  version                                                the version
+
+A block is named by its content hash; any unique prefix of 8 or more characters
+works, and a commit by its short ID. The actor is -actor, or $TIG_ACTOR, or
+user.name, or "cli". Agents working at once each use their own -session, or
+$TIG_SESSION.
+
+Any program on PATH named tigwx-<name> runs as tigwx <name>. Built-in commands
+come first. It gets the arguments, the working folder from -C, and $TIGWX, the
+path of this program.
+`
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	os.Exit(run(ctx, os.Args[1:], os.Stdout, os.Stderr))
+}
+
+type cli struct {
+	ctx     context.Context
+	out     io.Writer
+	errs    io.Writer
+	dir     string // -C
+	actor   string
+	session string
+	by      string // what -by says when nobody says otherwise
+	r       *tig.Repo
+	asJSON  bool // -json
+
+	// Where actor and by came from, for status.
+	actorFrom, byFrom string
+}
+
+// emit answers in JSON when asked to, and otherwise lets text do it.
+func (c *cli) emit(v any, text func()) error {
+	if c.asJSON {
+		return printJSON(c.out, v)
+	}
+	text()
+	return nil
+}
+
+// who adds -by and -via. tig keeps whatever it is told: a tool on top of it says
+// its own ways of working here.
+func (c *cli) who(fs *flag.FlagSet, by, via *string) {
+	fs.StringVar(by, "by", c.by, "who says so: human, ai, tool, or your own word")
+	fs.StringVar(via, "via", tig.ViaDirect, "how it came about, in your own word")
+}
+
+// Exit statuses, the way git uses them.
+const (
+	exitOK    = 0
+	exitNo    = 1   // the answer is no
+	exitFatal = 128 // it could not be done
+	exitUsage = 129 // it was asked for wrongly
+)
+
+// errNo ends a command with exit status 1 and nothing more to say.
+var errNo = errors.New("no")
+
+// flagError is a command given a flag it cannot use.
+type flagError struct {
+	command string
+	err     error
+}
+
+func (e *flagError) Error() string { return e.err.Error() }
+
+// exit prints what err calls for and says how to end.
+func (c *cli) exit(err error) int {
+	var fe *flagError
+	switch {
+	case err == nil, errors.Is(err, flag.ErrHelp):
+		return exitOK
+	case errors.Is(err, errNo):
+		return exitNo
+	case errors.As(err, &fe):
+		fmt.Fprintf(c.errs, "tigwx: %v\nSee 'tigwx help %s'.\n", fe.err, fe.command)
+		return exitUsage
+	case strings.HasPrefix(err.Error(), "usage: "):
+		fmt.Fprintln(c.errs, err)
+		return exitUsage
+	}
+	fmt.Fprintf(c.errs, "fatal: %s\n", strings.TrimPrefix(err.Error(), "tig: "))
+	return exitFatal
+}
+
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	g := flag.NewFlagSet("tigwx", flag.ContinueOnError)
+	g.SetOutput(io.Discard)
+	g.Usage = func() {}
+	dir := g.String("C", "", "the project folder")
+	actor := g.String("actor", "", "who is acting")
+	session := g.String("session", "", "keep this work in progress apart from other agents'")
+	var showVersion bool
+	g.BoolVar(&showVersion, "version", false, "the version")
+	g.BoolVar(&showVersion, "v", false, "the version")
+	if err := g.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(stdout, usage)
+			return exitOK
+		}
+		fmt.Fprintf(stderr, "tigwx: %v\nSee 'tigwx --help'.\n", err)
+		return exitUsage
+	}
+	if showVersion {
+		fmt.Fprintf(stdout, "tigwx version %s\n", versionString())
+		return exitOK
+	}
+	if g.NArg() == 0 {
+		fmt.Fprint(stdout, usage)
+		return exitNo
+	}
+	c := &cli{ctx: ctx, out: stdout, errs: stderr, dir: *dir, actor: *actor, session: *session}
+	if c.session == "" {
+		c.session = os.Getenv("TIG_SESSION")
+	}
+	if c.dir != "" {
+		if fi, err := os.Stat(c.dir); err != nil || !fi.IsDir() {
+			return c.exit(fmt.Errorf("cannot change to '%s': no such folder", c.dir))
+		}
+	}
+	name, rest := g.Arg(0), g.Args()[1:]
+	if cmd, ok := c.commands()[name]; ok {
+		if !saysNothingOfWho[name] {
+			if err := c.identify(); err != nil {
+				return c.exit(err)
+			}
+		}
+		return c.exit(cmd(rest))
+	}
+	if path, ok := external(name); ok {
+		return c.runExternal(path, rest)
+	}
+	return c.notACommand(name)
+}
+
+// saysNothingOfWho is the commands that run whatever the config holds: they are
+// how you find out what is wrong with it, or fix it.
+var saysNothingOfWho = map[string]bool{"help": true, "version": true, "config": true}
+
+func (c *cli) commands() map[string]func([]string) error {
+	return map[string]func([]string) error{
+		"init": c.init, "status": c.status, "config": c.config, "snap": c.snap, "log": c.log, "diff": c.diff, "restore": c.restore,
+		"blocks": c.blocks, "chain": c.chain, "show": c.show, "search": c.search, "check": c.check,
+		"trail": c.trail, "work": c.work, "mcp": c.mcp, "push": c.push,
+		"commits": c.commits, "commit": c.commit, "mark": c.mark, "fold": c.fold, "unmark": c.unmark, "baseline": c.baseline,
+		"sync": c.sync, "confirm": c.confirm, "reject": c.reject, "retire": c.retire, "accept": c.accept,
+		"reverse": c.reverse, "describe": c.describe, "link": c.link,
+		"set": c.set, "groups": c.groups, "help": c.help, "version": c.version,
+	}
+}
+
+// identify works out who is acting: what was said here, then the project's
+// config, then the global one. Outside a project there is only the global one.
+func (c *cli) identify() error {
+	global, err := tig.ReadGlobalConfig()
+	if err != nil {
+		return err
+	}
+	var project tig.Config
+	root, err := c.find()
+	if err != nil {
+		return err
+	}
+	if root != "" {
+		if project, err = tig.Open(root).Config(); err != nil {
+			return err
+		}
+	}
+	c.actor, c.actorFrom = first(
+		[2]string{c.actor, "-actor"},
+		[2]string{os.Getenv("TIG_ACTOR"), "$TIG_ACTOR"},
+		[2]string{project.UserName, "project config"},
+		[2]string{global.UserName, "global config"},
+		[2]string{"cli", "default"},
+	)
+	c.by, c.byFrom = first(
+		[2]string{project.UserBy, "project config"},
+		[2]string{global.UserBy, "global config"},
+		[2]string{tig.ByHuman, "default"},
+	)
+	return nil
+}
+
+// first is the first value that holds something, and where it came from.
+func first(values ...[2]string) (value, from string) {
+	for _, v := range values {
+		if v[0] != "" {
+			return v[0], v[1]
+		}
+	}
+	return "", ""
+}
+
+func (c *cli) flags(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	if name != "mcp" {
+		fs.BoolVar(&c.asJSON, "json", false, "answer in JSON")
+	}
+	return fs
+}
+
+// parse reads a command's flags from anywhere among its arguments, the way git
+// does; -- ends them.
+func (c *cli) parse(fs *flag.FlagSet, args []string) error {
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
+	var flags, rest []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			rest = append(rest, args[i+1:]...)
+			break
+		}
+		if len(a) < 2 || a[0] != '-' {
+			rest = append(rest, a)
+			continue
+		}
+		flags = append(flags, a)
+		name := strings.TrimLeft(a, "-")
+		if strings.Contains(name, "=") {
+			continue
+		}
+		f := fs.Lookup(name)
+		if f == nil {
+			continue // fs.Parse says what is wrong with it
+		}
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			continue
+		}
+		if i+1 == len(args) {
+			return &flagError{fs.Name(), fmt.Errorf("flag needs an argument: %s", a)}
+		}
+		i++
+		flags = append(flags, args[i])
+	}
+	err := fs.Parse(append(append(flags, "--"), rest...))
+	if errors.Is(err, flag.ErrHelp) {
+		c.commandHelp(fs)
+		return err
+	}
+	if err != nil {
+		return &flagError{fs.Name(), err}
+	}
+	return nil
+}
+
+// usageOf is what the usage says of a command, one command per entry.
+func usageOf(name string) []string {
+	var found []string
+	in := false
+	for _, line := range strings.Split(usage, "\n") {
+		switch {
+		case line == "  "+name || strings.HasPrefix(line, "  "+name+" "):
+			found, in = append(found, strings.TrimSpace(line)), true
+		case in && strings.HasPrefix(line, "   "):
+			found[len(found)-1] += "\n    " + strings.TrimSpace(line)
+		default:
+			in = false
+		}
+	}
+	return found
+}
+
+// commandHelp prints a command's usage and its flags. This is an answer, so it
+// goes to stdout.
+func (c *cli) commandHelp(fs *flag.FlagSet) {
+	for _, line := range usageOf(fs.Name()) {
+		fmt.Fprintf(c.out, "usage: tigwx %s\n", line)
+	}
+	var defaults strings.Builder
+	fs.SetOutput(&defaults)
+	fs.PrintDefaults()
+	fs.SetOutput(io.Discard)
+	if defaults.Len() > 0 {
+		fmt.Fprintf(c.out, "\nflags:\n%s", defaults.String())
+	}
+}
+
+// help answers tigwx help, tigwx help -a and tigwx help <command>.
+func (c *cli) help(args []string) error {
+	fs := c.flags("help")
+	all := fs.Bool("a", false, "every command, and those on PATH")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		name, rest := fs.Arg(0), fs.Args()[1:]
+		if cmd, ok := c.commands()[name]; ok {
+			c.asJSON = false
+			return cmd(append(slices.Clone(rest), "-h"))
+		}
+		if path, ok := external(name); ok {
+			if code := c.runExternal(path, []string{"--help"}); code != exitOK {
+				return errNo
+			}
+			return nil
+		}
+		fmt.Fprintf(c.errs, "tigwx: no help for '%s'. See 'tigwx help -a'.\n", name)
+		return errNo
+	}
+	if !*all && !c.asJSON {
+		fmt.Fprint(c.out, usage)
+		return nil
+	}
+	var builtin []string
+	for name := range c.commands() {
+		builtin = append(builtin, name)
+	}
+	slices.Sort(builtin)
+	onPath := externals()
+	return c.emit(map[string][]string{"commands": builtin, "external": onPath}, func() {
+		fmt.Fprintln(c.out, "commands:")
+		for _, name := range builtin {
+			fmt.Fprintf(c.out, "  %s\n", name)
+		}
+		if len(onPath) > 0 {
+			fmt.Fprintln(c.out, "\ncommands on PATH:")
+			for _, name := range onPath {
+				fmt.Fprintf(c.out, "  %s\n", name)
+			}
+		}
+	})
+}
+
+// externalName is what can follow tigwx- in the name of a program on PATH.
+var externalName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
+// external finds tigwx-<name> on PATH. A program in the current folder that PATH
+// only reaches by being relative does not count: being in a folder is not
+// asking for it to run.
+func external(name string) (string, bool) {
+	if !externalName.MatchString(name) {
+		return "", false
+	}
+	path, err := exec.LookPath("tigwx-" + name)
+	if err != nil {
+		return "", false
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	return abs, true
+}
+
+// externals lists the commands on PATH.
+func externals() []string {
+	seen := map[string]bool{}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if dir == "" {
+			continue
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			name, ok := strings.CutPrefix(e.Name(), "tigwx-")
+			if !ok {
+				continue
+			}
+			if runtime.GOOS == "windows" {
+				name = strings.TrimSuffix(name, filepath.Ext(name))
+			}
+			if _, builtin := (&cli{}).commands()[name]; builtin {
+				continue
+			}
+			if _, ok := external(name); ok {
+				seen[name] = true
+			}
+		}
+	}
+	found := make([]string, 0, len(seen))
+	for name := range seen {
+		found = append(found, name)
+	}
+	slices.Sort(found)
+	return found
+}
+
+// runExternal runs a program from PATH as a command of tigwx and ends the way it
+// ended.
+func (c *cli) runExternal(path string, args []string) int {
+	cmd := exec.CommandContext(c.ctx, path, args...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, c.out, c.errs
+	cmd.Dir = c.dir
+	cmd.Env = os.Environ()
+	if self, err := os.Executable(); err == nil {
+		cmd.Env = append(cmd.Env, "TIGWX="+self)
+	}
+	if c.actor != "" {
+		cmd.Env = append(cmd.Env, "TIG_ACTOR="+c.actor)
+	}
+	if c.session != "" {
+		cmd.Env = append(cmd.Env, "TIG_SESSION="+c.session)
+	}
+	err := cmd.Run()
+	var failed *exec.ExitError
+	if errors.As(err, &failed) {
+		if code := failed.ExitCode(); code >= 0 {
+			return code
+		}
+		return exitFatal
+	}
+	if err != nil {
+		return c.exit(err)
+	}
+	return exitOK
+}
+
+// notACommand answers a name nothing has, and offers the nearest there is.
+func (c *cli) notACommand(name string) int {
+	fmt.Fprintf(c.errs, "tigwx: '%s' is not a tigwx command. See 'tigwx --help'.\n", name)
+	names := externals()
+	for n := range c.commands() {
+		names = append(names, n)
+	}
+	slices.Sort(names)
+	best, bestDist := "", 3 // further than this is not a slip
+	for _, n := range names {
+		if d := editDistance(name, n); d < bestDist {
+			best, bestDist = n, d
+		}
+	}
+	if best != "" {
+		fmt.Fprintf(c.errs, "\nThe most similar command is\n\t%s\n", best)
+	}
+	return exitNo
+}
+
+// editDistance counts the single-character edits between two words.
+func editDistance(a, b string) int {
+	prev := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur := make([]int, len(b)+1)
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev = cur
+	}
+	return prev[len(b)]
+}
+
+func (c *cli) version(args []string) error {
+	if err := c.parse(c.flags("version"), args); err != nil {
+		return err
+	}
+	v := versionString()
+	return c.emit(map[string]string{"version": v}, func() { fmt.Fprintf(c.out, "tigwx version %s\n", v) })
+}
+
+// status says where the project stands. It only reads, and it never says whether
+// that is good: check does, and its exit status says it.
+func (c *cli) status(args []string) error {
+	fs := c.flags("status")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("usage: tigwx status")
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	cfg, err := c.r.Config()
+	if err != nil {
+		return err
+	}
+	head, err := c.r.Head(c.ctx)
+	if err != nil {
+		return err
+	}
+	open, err := c.r.Current()
+	if err != nil {
+		return err
+	}
+	var changes []tig.Change
+	if head.ID != "" {
+		if changes, err = c.r.Changed(c.ctx, head.Tree); err != nil {
+			return err
+		}
+	}
+	a, err := c.r.Analyze(c.ctx, "")
+	if err != nil {
+		return err
+	}
+	commits, err := c.r.Commits(c.ctx)
+	if err != nil {
+		return err
+	}
+	out := statusOut{
+		Root: c.r.Root, Main: cfg.Root,
+		Actor: c.actor, ActorFrom: c.actorFrom, By: c.by, ByFrom: c.byFrom,
+		Changes: changes, Closed: a.Report.Closed,
+	}
+	if head.ID != "" {
+		out.Snapshot = &head
+	}
+	if open != nil {
+		out.Work = &statusWork{Intent: open.Intent, Actor: open.Actor, Steps: len(open.Steps), Started: open.Started}
+	}
+	blocks := make([]*tig.Block, 0, len(a.Chain.Order)+len(a.Chain.InferredBlocks))
+	for _, hash := range a.Chain.Order {
+		blocks = append(blocks, a.Chain.Blocks[hash])
+	}
+	blocks = append(blocks, a.Chain.InferredBlocks...)
+	for _, b := range blocks {
+		for _, s := range b.Sentences {
+			if s.Unsynced {
+				out.Unsynced++
+			}
+		}
+	}
+	for _, i := range a.Ledger.Intents() {
+		if i.State == tig.IntentProposed {
+			out.ProposedIntents++
+		}
+		for _, e := range a.Ledger.LinksOf(i.ID) {
+			if a.Ledger.LinkState(e) == tig.LinkProposed {
+				out.ProposedLinks++
+			}
+		}
+	}
+	for _, w := range commits.All() {
+		if a.Ledger.AcceptanceOf(w) == tig.WorkCandidate {
+			out.Candidates++
+		}
+	}
+	return c.emit(out, func() { c.printStatus(out) })
+}
+
+type statusWork struct {
+	Intent  string    `json:"intent"`
+	Actor   string    `json:"actor,omitempty"`
+	Steps   int       `json:"steps"`
+	Started time.Time `json:"started"`
+}
+
+type statusOut struct {
+	Root            string        `json:"root"`
+	Main            string        `json:"main"`
+	Actor           string        `json:"actor"`
+	ActorFrom       string        `json:"actorFrom"`
+	By              string        `json:"by"`
+	ByFrom          string        `json:"byFrom"`
+	Snapshot        *tig.Snapshot `json:"snapshot,omitempty"`
+	Work            *statusWork   `json:"work,omitempty"`
+	Changes         []tig.Change  `json:"changes"`
+	Unsynced        int           `json:"unsynced"`
+	ProposedIntents int           `json:"proposedIntents"`
+	ProposedLinks   int           `json:"proposedLinks"`
+	Candidates      int           `json:"candidates"`
+	Closed          bool          `json:"closed"`
+}
+
+func (c *cli) printStatus(s statusOut) {
+	fmt.Fprintf(c.out, "project: %s\n", s.Root)
+	fmt.Fprintf(c.out, "main document: %s\n", s.Main)
+	fmt.Fprintf(c.out, "acting as: %s (%s), by %s (%s)\n", s.Actor, s.ActorFrom, s.By, s.ByFrom)
+	if s.Snapshot != nil {
+		fmt.Fprintf(c.out, "last snapshot: %s  %s  %s\n", short(s.Snapshot.ID), s.Snapshot.At.Local().Format("2006-01-02 15:04"), s.Snapshot.Reason)
+	} else {
+		fmt.Fprintln(c.out, "last snapshot: none")
+	}
+	if s.Work != nil {
+		fmt.Fprintf(c.out, "work in progress: %s (%d steps, %s)\n", s.Work.Intent, s.Work.Steps, s.Work.Actor)
+	}
+	if len(s.Changes) > 0 {
+		fmt.Fprintln(c.out, "changed since the last snapshot:")
+		printChanges(c.out, "  ", s.Changes)
+	}
+	fmt.Fprintf(c.out, "lines waiting for a sync: %d\n", s.Unsynced)
+	fmt.Fprintf(c.out, "proposed intents: %d\n", s.ProposedIntents)
+	fmt.Fprintf(c.out, "proposed links: %d\n", s.ProposedLinks)
+	fmt.Fprintf(c.out, "candidate commits: %d\n", s.Candidates)
+	closed := "no"
+	if s.Closed {
+		closed = "yes"
+	}
+	fmt.Fprintf(c.out, "chain closed: %s\n", closed)
+}
+
+// config reads and sets what the config files hold.
+func (c *cli) config(args []string) error {
+	const use = "usage: tigwx config [-global] <key> [value]\n   or: tigwx config [-global] -list\n   or: tigwx config [-global] -unset <key>"
+	fs := c.flags("config")
+	global := fs.Bool("global", false, "the file for every project of yours, not this project's")
+	list := fs.Bool("list", false, "every value set")
+	unset := fs.Bool("unset", false, "take the value away")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	switch {
+	case *list && (fs.NArg() != 0 || *unset), *unset && fs.NArg() != 1, !*list && (fs.NArg() < 1 || fs.NArg() > 2):
+		return errors.New(use)
+	}
+	if *list {
+		return c.configList(*global)
+	}
+	key := fs.Arg(0)
+	k, ok := configKeyOf(key)
+	if !ok {
+		return fmt.Errorf("usage: tigwx config: no key '%s'; the keys are %s", key, strings.Join(configKeyNames(), ", "))
+	}
+	if *global && !k.global {
+		return fmt.Errorf("usage: tigwx config: '%s' belongs to a project; it has no global value", key)
+	}
+	if !*unset && fs.NArg() == 1 {
+		return c.configGet(k, *global)
+	}
+	value := ""
+	if !*unset {
+		if value = fs.Arg(1); value == "" {
+			return fmt.Errorf("usage: tigwx config: an empty value; to take it away use -unset")
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			return errors.New("usage: tigwx config: a config value is one line")
+		}
+	}
+	return c.configSet(k, *global, value)
+}
+
+// configKey is one key the config files can hold.
+type configKey struct {
+	name    string
+	global  bool                            // it has a global value too
+	project func(tig.Config) string         // what the project's holds
+	put     func(*tig.Config, string)       // sets the project's
+	ofUser  func(*tig.GlobalConfig) *string // the global value, when it has one
+}
+
+var configKeys = []configKey{
+	{name: "user.name", global: true,
+		project: func(c tig.Config) string { return c.UserName },
+		put:     func(c *tig.Config, v string) { c.UserName = v },
+		ofUser:  func(g *tig.GlobalConfig) *string { return &g.UserName }},
+	{name: "user.by", global: true,
+		project: func(c tig.Config) string { return c.UserBy },
+		put:     func(c *tig.Config, v string) { c.UserBy = v },
+		ofUser:  func(g *tig.GlobalConfig) *string { return &g.UserBy }},
+	{name: "root",
+		project: func(c tig.Config) string { return c.Root },
+		put:     func(c *tig.Config, v string) { c.Root = v }},
+	{name: "inferred",
+		project: func(c tig.Config) string { return c.Inferred },
+		put:     func(c *tig.Config, v string) { c.Inferred = v }},
+	{name: "outside",
+		project: func(c tig.Config) string { return strings.Join(c.Outside, ",") },
+		put: func(c *tig.Config, v string) {
+			c.Outside = nil
+			for _, p := range strings.Split(v, ",") {
+				if p = strings.TrimSpace(p); p != "" {
+					c.Outside = append(c.Outside, p)
+				}
+			}
+		}},
+}
+
+func configKeyOf(name string) (configKey, bool) {
+	for _, k := range configKeys {
+		if k.name == name {
+			return k, true
+		}
+	}
+	return configKey{}, false
+}
+
+func configKeyNames() []string {
+	names := make([]string, len(configKeys))
+	for i, k := range configKeys {
+		names[i] = k.name
+	}
+	return names
+}
+
+// configFiles reads both files. A project is only there if one is found.
+func (c *cli) configFiles() (tig.GlobalConfig, *tig.Config, error) {
+	global, err := tig.ReadGlobalConfig()
+	if err != nil {
+		return global, nil, err
+	}
+	root, err := c.find()
+	if err != nil || root == "" {
+		return global, nil, err
+	}
+	project, err := tig.Open(root).Config()
+	if err != nil {
+		return global, nil, err
+	}
+	return global, &project, nil
+}
+
+// value is what a key holds, the project's ahead of the global one.
+func (k configKey) value(global tig.GlobalConfig, project *tig.Config, onlyGlobal bool) string {
+	if project != nil && !onlyGlobal {
+		if v := k.project(*project); v != "" {
+			return v
+		}
+	}
+	if k.global {
+		return *k.ofUser(&global)
+	}
+	return ""
+}
+
+func (c *cli) configGet(k configKey, onlyGlobal bool) error {
+	global, project, err := c.configFiles()
+	if err != nil {
+		return err
+	}
+	v := k.value(global, project, onlyGlobal)
+	if err := c.emit(map[string]string{"key": k.name, "value": v}, func() {
+		if v != "" {
+			fmt.Fprintln(c.out, v)
+		}
+	}); err != nil {
+		return err
+	}
+	if v == "" {
+		return errNo
+	}
+	return nil
+}
+
+func (c *cli) configList(onlyGlobal bool) error {
+	global, project, err := c.configFiles()
+	if err != nil {
+		return err
+	}
+	values := map[string]string{}
+	var lines []string
+	for _, k := range configKeys {
+		if v := k.value(global, project, onlyGlobal); v != "" {
+			values[k.name] = v
+			lines = append(lines, k.name+"="+v)
+		}
+	}
+	return c.emit(values, func() {
+		for _, line := range lines {
+			fmt.Fprintln(c.out, line)
+		}
+	})
+}
+
+func (c *cli) configSet(k configKey, onlyGlobal bool, value string) error {
+	if onlyGlobal {
+		global, err := tig.ReadGlobalConfig()
+		if err != nil {
+			return err
+		}
+		*k.ofUser(&global) = value
+		return tig.WriteGlobalConfig(global)
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	cfg, err := c.r.Config()
+	if err != nil {
+		return err
+	}
+	k.put(&cfg, value)
+	return c.r.SetConfig(cfg)
+}
+
+// start is the folder tigwx was pointed at.
+func (c *cli) start() (string, error) {
+	if c.dir != "" {
+		return filepath.Abs(c.dir)
+	}
+	return os.Getwd()
+}
+
+// find is the project: the nearest folder at or above the start that has a .tig.
+// None: "".
+func (c *cli) find() (string, error) {
+	start, err := c.start()
+	if err != nil {
+		return "", err
+	}
+	for d := start; ; d = filepath.Dir(d) {
+		if fi, err := os.Stat(filepath.Join(d, ".tig")); err == nil && fi.IsDir() {
+			return d, nil
+		}
+		if filepath.Dir(d) == d {
+			return "", nil
+		}
+	}
+}
+
+// open finds the project, or says there is none.
+func (c *cli) open() error {
+	root, err := c.find()
+	if err != nil {
+		return err
+	}
+	if root == "" {
+		return errors.New("not a tig repository (or any of the parent directories): .tig\nhint: start one here with 'tigwx init'")
+	}
+	c.r = tig.Open(root)
+	c.r.Session = c.session
+	return nil
+}
+
+func short(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
+}
+
+func when(w interface{ IsZero() bool }, s string) string {
+	if w.IsZero() {
+		return "-"
+	}
+	return s
+}
+
+func (c *cli) init(args []string) error {
+	fs := c.flags("init")
+	root := fs.String("root", "README.md", "the main document")
+	outside := fs.String("outside", "", "comma-separated path prefixes that are not part of the chain")
+	force := fs.Bool("force", false, "the code there is one commit, and every line of the documents goes with it")
+	by := fs.String("by", c.by, "who says so: human, ai, tool, or your own word")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	dir, err := c.start()
+	if err != nil {
+		return err
+	}
+	r := tig.Open(dir)
+	existed := r.Exists()
+	cfg := tig.Config{Root: *root}
+	for _, p := range strings.Split(*outside, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			cfg.Outside = append(cfg.Outside, p)
+		}
+	}
+	if err := r.Init(cfg); err != nil {
+		return err
+	}
+	s, _, err := r.Take(c.ctx, tig.ReasonOpen, c.actor)
+	if err != nil {
+		return err
+	}
+	cfg, err = r.Config()
+	if err != nil {
+		return err
+	}
+	out := struct {
+		Dir      string               `json:"dir"`
+		Existed  bool                 `json:"existed"`
+		Root     string               `json:"root"`
+		Snapshot string               `json:"snapshot"`
+		Force    *tig.InitForceResult `json:"force,omitempty"`
+	}{Dir: r.Dir, Existed: existed, Root: cfg.Root, Snapshot: s.ID}
+	if *force {
+		res, err := r.InitForce(c.ctx, tig.InitForceInput{Config: cfg, By: *by, Actor: c.actor})
+		if err != nil {
+			return err
+		}
+		out.Force = &res
+	}
+	return c.emit(out, func() {
+		if existed {
+			fmt.Fprintf(c.out, "tig already in %s (config kept)\n", r.Dir)
+		} else {
+			fmt.Fprintf(c.out, "tig started in %s\n", r.Dir)
+		}
+		fmt.Fprintf(c.out, "main document %s, snapshot %s\n", cfg.Root, short(s.ID))
+		if out.Force != nil {
+			fmt.Fprintf(c.out, "baseline %s; %d lines marked in %d documents\n", short(out.Force.Baseline.ID), out.Force.Lines, len(out.Force.Docs))
+		}
+	})
+}
+
+func (c *cli) snap(args []string) error {
+	fs := c.flags("snap")
+	reason := fs.String("reason", tig.ReasonScan, "why the snapshot is taken")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	s, changed, err := c.r.Take(c.ctx, *reason, c.actor)
+	if err != nil {
+		return err
+	}
+	return c.emit(map[string]any{"snapshot": s, "changed": changed}, func() {
+		if !changed {
+			fmt.Fprintf(c.out, "nothing changed since snapshot %s\n", short(s.ID))
+			return
+		}
+		fmt.Fprintf(c.out, "snapshot %s\n", short(s.ID))
+	})
+}
+
+func (c *cli) log(args []string) error {
+	fs := c.flags("log")
+	n := fs.Int("n", 20, "how many snapshots")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	snaps, err := c.r.Log(c.ctx, *n)
+	if err != nil {
+		return err
+	}
+	return c.emit(snaps, func() {
+		for _, s := range snaps {
+			fmt.Fprintf(c.out, "%s  %s  %-20s %s\n", short(s.ID), s.At.Local().Format("2006-01-02 15:04"), s.Reason, s.Actor)
+		}
+	})
+}
+
+// snapshot is a snapshot by a unique prefix of its hash, or HEAD.
+func (c *cli) snapshot(ref string) (tig.Snapshot, error) {
+	if ref == "" || ref == "HEAD" {
+		s, err := c.r.Head(c.ctx)
+		if err == nil && s.ID == "" {
+			err = errors.New("no snapshot yet")
+		}
+		return s, err
+	}
+	if len(ref) < 6 {
+		return tig.Snapshot{}, fmt.Errorf("%q: give 6 or more characters of the snapshot", ref)
+	}
+	snaps, err := c.r.Log(c.ctx, 0)
+	if err != nil {
+		return tig.Snapshot{}, err
+	}
+	var found []tig.Snapshot
+	for _, s := range snaps {
+		if strings.HasPrefix(s.ID, ref) {
+			found = append(found, s)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return tig.Snapshot{}, fmt.Errorf("no snapshot %q", ref)
+	case 1:
+		return found[0], nil
+	}
+	return tig.Snapshot{}, fmt.Errorf("%q is more than one snapshot", ref)
+}
+
+func (c *cli) diff(args []string) error {
+	fs := c.flags("diff")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	args = fs.Args()
+	if err := c.open(); err != nil {
+		return err
+	}
+	if len(args) > 2 {
+		return errors.New("usage: tigwx diff [from [to]]")
+	}
+	from, err := c.snapshot(at(args, 0))
+	if err != nil {
+		return err
+	}
+	var changes []tig.Change
+	if len(args) == 2 {
+		to, err := c.snapshot(args[1])
+		if err != nil {
+			return err
+		}
+		changes, err = tig.DiffTrees(c.ctx, c.r.Objects, from.Tree, to.Tree)
+		if err != nil {
+			return err
+		}
+	} else if changes, err = c.r.Changed(c.ctx, from.Tree); err != nil {
+		return err
+	}
+	return c.emit(changes, func() { printChanges(c.out, "", changes) })
+}
+
+func at(args []string, i int) string {
+	if i < len(args) {
+		return args[i]
+	}
+	return ""
+}
+
+func printChanges(w io.Writer, indent string, changes []tig.Change) {
+	ops := map[string]string{"add": "A", "modify": "M", "delete": "D"}
+	for _, ch := range changes {
+		fmt.Fprintf(w, "%s%s %s\n", indent, ops[ch.Op], ch.Path)
+	}
+}
+
+func (c *cli) restore(args []string) error {
+	fs := c.flags("restore")
+	all := fs.Bool("all", false, "every file that differs from the snapshot")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		return errors.New("usage: tigwx restore [-all] <snapshot> [path...]")
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	s, err := c.snapshot(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	paths := fs.Args()[1:]
+	if len(paths) == 0 {
+		if !*all {
+			return &flagError{fs.Name(), errors.New("name the files to restore, or give -all")}
+		}
+		changes, err := c.r.Changed(c.ctx, s.Tree)
+		if err != nil {
+			return err
+		}
+		for _, ch := range changes {
+			paths = append(paths, ch.Path)
+		}
+	}
+	// The project as it is now is kept first, so the restore can be undone.
+	before, _, err := c.r.Take(c.ctx, tig.ReasonScan, c.actor)
+	if err != nil {
+		return err
+	}
+	if err := c.r.Restore(c.ctx, s.Tree, paths); err != nil {
+		return err
+	}
+	return c.emit(map[string]any{"restored": paths, "from": s.ID, "before": before.ID}, func() {
+		fmt.Fprintf(c.out, "restored %d files from %s (the project before it is snapshot %s)\n", len(paths), short(s.ID), short(before.ID))
+	})
+}
+
+func heading(b *tig.Block) string {
+	if b.Level == 0 {
+		return b.Path
+	}
+	return strings.Repeat("#", b.Level) + " " + b.Title
+}
+
+func (c *cli) blocks(args []string) error {
+	fs := c.flags("blocks")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	args = fs.Args()
+	if len(args) != 1 {
+		return errors.New("usage: tigwx blocks <file.md>")
+	}
+	data, err := os.ReadFile(args[0])
+	if err != nil {
+		return err
+	}
+	// A block's hash includes its path in the project.
+	rel := filepath.ToSlash(args[0])
+	if c.open() == nil {
+		if abs, err := filepath.Abs(args[0]); err == nil {
+			if p, err := filepath.Rel(c.r.Root, abs); err == nil && !strings.HasPrefix(p, "..") {
+				rel = filepath.ToSlash(p)
+			}
+		}
+	}
+	blocks := tig.ParseBlocks(rel, data)
+	return c.emit(blocks, func() {
+		for _, b := range blocks {
+			fmt.Fprintf(c.out, "%s  %s%s  (lines %d-%d)\n", short(b.Hash), strings.Repeat("  ", max(b.Level-1, 0)), heading(&b), b.Start, b.End)
+			for _, cmd := range b.Accept {
+				fmt.Fprintf(c.out, "              %s$ %s\n", strings.Repeat("  ", b.Level), cmd)
+			}
+		}
+	})
+}
+
+func (c *cli) analyze() (*tig.Analysis, error) {
+	if err := c.open(); err != nil {
+		return nil, err
+	}
+	return c.r.Analyze(c.ctx, "")
+}
+
+func (c *cli) chain(args []string) error {
+	fs := c.flags("chain")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("usage: tigwx chain")
+	}
+	a, err := c.analyze()
+	if err != nil {
+		return err
+	}
+	blocks := make([]*tig.Block, 0, len(a.Chain.Order))
+	for _, h := range a.Chain.Order {
+		blocks = append(blocks, a.Chain.Blocks[h])
+	}
+	return c.emit(blocks, func() {
+		for _, b := range blocks {
+			fmt.Fprintf(c.out, "%s  %s%s\n", short(b.Hash), strings.Repeat("  ", max(b.Level-1, 0)), heading(b))
+		}
+	})
+}
+
+func (c *cli) show(args []string) error {
+	fs := c.flags("show")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	args = fs.Args()
+	if len(args) != 1 {
+		return errors.New("usage: tigwx show <block|reference>")
+	}
+	a, err := c.analyze()
+	if err != nil {
+		return err
+	}
+	ch := a.Chain
+	b, err := ch.Block(args[0])
+	if err != nil {
+		if _, perr := tig.ParseRef(args[0]); perr != nil {
+			return err
+		}
+		return c.showRef(args[0])
+	}
+	if c.asJSON {
+		var stale []tig.Finding
+		for _, f := range a.Report.Stale {
+			if f.Block == b.Hash {
+				stale = append(stale, f)
+			}
+		}
+		return printJSON(c.out, map[string]any{"kind": "block", "block": b, "handsOn": ch.Details[b.Hash], "links": ch.Refs[b.Hash], "built": a.Built[b.Hash],
+			"was": a.Before(b.Hash), "stale": stale, "works": a.Trail(b.Hash)})
+	}
+	fmt.Fprintf(c.out, "%s\n%s:%d-%d  %s\n", b.Hash, b.Path, b.Start, b.End, strings.Join(b.Heading, " > "))
+	if b.Text != "" {
+		fmt.Fprintf(c.out, "\n  %s\n\n", strings.ReplaceAll(b.Text, "\n", "\n  "))
+	}
+	list := func(label string, items []string) {
+		if len(items) > 0 {
+			fmt.Fprintf(c.out, "%s: %s\n", label, strings.Join(items, ", "))
+		}
+	}
+	list("hands on to", ch.Details[b.Hash])
+	list("links to", ch.Refs[b.Hash])
+	list("built", a.Built[b.Hash])
+	var was []string
+	for _, m := range a.Before(b.Hash) {
+		was = append(was, short(m.Old))
+	}
+	list("was", was)
+	for _, f := range a.Report.Stale {
+		if f.Block == b.Hash {
+			fmt.Fprintf(c.out, "stale: %s: %s\n", f.Path, f.Message)
+		}
+	}
+	for i, w := range a.Trail(b.Hash) {
+		if i == 0 {
+			fmt.Fprintln(c.out, "works:")
+		}
+		if i == 5 {
+			fmt.Fprintln(c.out, "  ... (tigwx trail for all)")
+			break
+		}
+		c.printWork(w)
+	}
+	return nil
+}
+
+func (c *cli) search(args []string) error {
+	fs := c.flags("search")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	args = fs.Args()
+	if len(args) == 0 {
+		return errors.New("usage: tigwx search <words>")
+	}
+	a, err := c.analyze()
+	if err != nil {
+		return err
+	}
+	files, err := tig.Files(c.ctx, c.r.Root, c.r.Skip)
+	if err != nil {
+		return err
+	}
+	hits := a.Search(strings.Join(args, " "), files)
+	return c.emit(hits, func() {
+		for _, h := range hits {
+			fmt.Fprintf(c.out, "%-5s %s  %s  %s\n", h.Kind, short(h.Ref), h.Path, h.Title)
+			if h.Snippet != "" {
+				fmt.Fprintf(c.out, "      %s\n", h.Snippet)
+			}
+		}
+	})
+}
+
+func (c *cli) check(args []string) error {
+	fs := c.flags("check")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	a, err := c.analyze()
+	if err != nil {
+		return err
+	}
+	rep := a.Report
+	if err := c.emit(rep, func() { c.printReport(rep) }); err != nil {
+		return err
+	}
+	if !rep.Closed {
+		return errNo
+	}
+	return nil
+}
+
+func (c *cli) printReport(rep tig.Report) {
+	closed := "no"
+	if rep.Closed {
+		closed = "yes"
+	}
+	fmt.Fprintf(c.out, "chain from %s: %d documents, %d blocks, %d lines with work\n", rep.Root, rep.Docs, rep.Blocks, rep.Marks)
+	fmt.Fprintf(c.out, "closed: %s\n", closed)
+	findings := func(label string, fs []tig.Finding) {
+		if len(fs) == 0 {
+			return
+		}
+		fmt.Fprintf(c.out, "\n%s:\n", label)
+		for _, f := range fs {
+			where := f.Path
+			if f.Line > 0 {
+				where = fmt.Sprintf("%s:%d", f.Path, f.Line)
+			}
+			if f.Title != "" {
+				where += " (" + f.Title + ")"
+			}
+			fmt.Fprintf(c.out, "  %s: %s\n", where, f.Message)
+		}
+	}
+	findings("broken", rep.Broken)
+	findings("stale", rep.Stale)
+	if len(rep.Undesigned) > 0 {
+		fmt.Fprintf(c.out, "\nno design reaches:\n")
+		for _, f := range rep.Undesigned {
+			fmt.Fprintf(c.out, "  %s\n", f)
+		}
+	}
+}
+
+func (c *cli) printWork(w tig.Work) {
+	id := short(w.ID)
+	if id == "" {
+		id = "(in progress)"
+	}
+	at := w.At
+	if at.IsZero() {
+		at = w.Started
+	}
+	fmt.Fprintf(c.out, "  %s  %-11s %s  %s  %s\n", id, w.Result, at.Local().Format("2006-01-02 15:04"), w.Actor, w.Intent)
+}
+
+func (c *cli) trail(args []string) error {
+	fs := c.flags("trail")
+	steps := fs.Bool("steps", false, "each work's steps")
+	n := fs.Int("n", 20, "how many works")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: tigwx trail [-steps] [-n 20] <block|file>")
+	}
+	a, err := c.analyze()
+	if err != nil {
+		return err
+	}
+	ref := filepath.ToSlash(fs.Arg(0))
+	files, err := tig.Files(c.ctx, c.r.Root, c.r.Skip)
+	if err != nil {
+		return err
+	}
+	var works []tig.Work
+	if slices.Contains(files, ref) {
+		works = a.FileTrail(c.ctx, ref)
+	} else {
+		b, err := a.Chain.Block(ref)
+		if err != nil {
+			return err
+		}
+		works = a.Trail(b.Hash)
+	}
+	if c.asJSON {
+		type entry struct {
+			tig.Work
+			StepList []tig.Step `json:"stepList,omitempty"`
+		}
+		out := make([]entry, 0, len(works))
+		for i, w := range works {
+			if i == *n {
+				break
+			}
+			e := entry{Work: w}
+			if *steps {
+				e.StepList = a.Steps(w)
+			}
+			out = append(out, e)
+		}
+		return printJSON(c.out, out)
+	}
+	for i, w := range works {
+		if i == *n {
+			fmt.Fprintf(c.out, "  ... %d more (-n)\n", len(works)-i)
+			break
+		}
+		c.printWork(w)
+		if !*steps {
+			continue
+		}
+		for _, s := range a.Steps(w) {
+			c.printStep(s)
+		}
+	}
+	return nil
+}
+
+func (c *cli) printStep(s tig.Step) {
+	line := s.Note
+	if s.Command != "" {
+		line = strings.TrimSpace("$ " + s.Command + "  " + line)
+	}
+	if s.Exit != nil {
+		line += fmt.Sprintf("  (exit %d", *s.Exit)
+		if s.Runner != "" {
+			line += ", run by " + s.Runner
+		}
+		line += ")"
+	}
+	fmt.Fprintf(c.out, "      %-8s %s\n", s.Kind, line)
+	if s.Before != "" && s.After != "" {
+		if changes, err := tig.DiffTrees(c.ctx, c.r.Objects, s.Before, s.After); err == nil {
+			printChanges(c.out, "               ", changes)
+		}
+	}
+}
+
+func (c *cli) work(args []string) error {
+	const use = "usage: tigwx work start|step|finish|status"
+	if len(args) == 0 {
+		return errors.New(use)
+	}
+	if args[0] == "-h" || args[0] == "-help" || args[0] == "--help" {
+		return c.parse(c.flags("work"), []string{"-h"})
+	}
+	if !slices.Contains([]string{"start", "step", "finish", "status"}, args[0]) {
+		return errors.New(use)
+	}
+	// Asking how to use one of them does not need a project.
+	if !slices.ContainsFunc(args[1:], func(a string) bool { return a == "-h" || a == "-help" || a == "--help" }) {
+		if err := c.open(); err != nil {
+			return err
+		}
+	}
+	switch args[0] {
+	case "start":
+		return c.workStart(args[1:])
+	case "step":
+		return c.workStep(args[1:])
+	case "finish":
+		return c.workFinish(args[1:])
+	case "status":
+		fs := c.flags("work status")
+		if err := c.parse(fs, args[1:]); err != nil {
+			return err
+		}
+		w, err := c.r.Current()
+		if err != nil {
+			return err
+		}
+		if c.asJSON {
+			return printJSON(c.out, map[string]any{"inProgress": w != nil, "work": w})
+		}
+		if w == nil {
+			fmt.Fprintln(c.out, "no work in progress")
+			return nil
+		}
+		fmt.Fprintf(c.out, "in progress since %s by %s: %s\n%d steps\n", w.Started.Local().Format("2006-01-02 15:04"), w.Actor, w.Intent, len(w.Steps))
+		return nil
+	}
+	return errors.New(use)
+}
+
+func (c *cli) commits(args []string) error {
+	fs := c.flags("commits")
+	n := fs.Int("n", 20, "how many")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	commits, err := c.r.Commits(c.ctx)
+	if err != nil {
+		return err
+	}
+	all := commits.All()
+	slices.Reverse(all)
+	if len(all) > *n {
+		all = all[:*n]
+	}
+	l, err := c.r.Ledger(c.ctx)
+	if err != nil {
+		return err
+	}
+	type line struct {
+		Short      string `json:"short"`
+		ID         string `json:"id"`
+		At         string `json:"at"`
+		Result     string `json:"result"`
+		Acceptance string `json:"acceptance"`
+		Intent     string `json:"intent"`
+		Actor      string `json:"actor,omitempty"`
+	}
+	lines := make([]line, 0, len(all))
+	for _, w := range all {
+		lines = append(lines, line{commits.Short(w.ID), w.ID, w.At.UTC().Format("2006-01-02T15:04:05Z"), w.Result, l.AcceptanceOf(w), w.Intent, w.Actor})
+	}
+	return c.emit(lines, func() {
+		for i, w := range all {
+			fmt.Fprintf(c.out, "%-6s %s  %-10s %-9s %s\n", lines[i].Short, w.At.Local().Format("2006-01-02 15:04"), w.Result, lines[i].Acceptance, w.Intent)
+		}
+	})
+}
+
+// many collects a flag given several times.
+type many []string
+
+func (m *many) String() string     { return strings.Join(*m, ",") }
+func (m *many) Set(v string) error { *m = append(*m, v); return nil }
+
+func (c *cli) set(args []string) error {
+	fs := c.flags("set")
+	var in tig.SetInput
+	fs.Var((*many)(&in.Intents), "i", "an intent, by reference")
+	fs.Var((*many)(&in.Sentences), "s", "a sentence, in its words")
+	fs.Var((*many)(&in.Commits), "id", "a commit")
+	fs.Var((*many)(&in.Files), "f", "a file")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	a, err := c.analyze()
+	if err != nil {
+		return err
+	}
+	set := a.Relations(c.ctx).Set(in)
+	if c.asJSON {
+		return printJSON(c.out, set)
+	}
+	for _, s := range set.Sentences {
+		fmt.Fprintf(c.out, "sentence %s:%d %s %s\n", s.Path, s.Line, s.Text, strings.Join(s.IDs, " "))
+	}
+	for _, w := range set.Commits {
+		fmt.Fprintf(c.out, "commit   %s %s\n", w.Short, w.Intent)
+	}
+	for _, f := range set.Files {
+		fmt.Fprintf(c.out, "file     %s\n", f)
+	}
+	if set.Baseline {
+		fmt.Fprintln(c.out, "a sentence names the baseline; its files are not listed")
+	}
+	for _, m := range set.Missing {
+		fmt.Fprintf(c.out, "missing  %s\n", m)
+	}
+	return nil
+}
+
+func (c *cli) groups(args []string) error {
+	fs := c.flags("groups")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	a, err := c.analyze()
+	if err != nil {
+		return err
+	}
+	groups := a.Relations(c.ctx).Groups()
+	if c.asJSON {
+		return printJSON(c.out, groups)
+	}
+	for _, g := range groups {
+		fmt.Fprintf(c.out, "%-11s %-8s %d sentences, %d commits, %d files\n", g.Kind, g.Key, len(g.Sentences), len(g.Commits), len(g.Files))
+	}
+	return nil
+}
+
+func printJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
+func (c *cli) commit(args []string) error {
+	fs := c.flags("commit")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	args = fs.Args()
+	if len(args) != 1 {
+		return errors.New("usage: tigwx commit <id>")
+	}
+	a, err := c.analyze()
+	if err != nil {
+		return err
+	}
+	v, err := a.Commit(args[0])
+	if err != nil {
+		return err
+	}
+	if c.asJSON {
+		return printJSON(c.out, v)
+	}
+	fmt.Fprintf(c.out, "%s  %s\n%s  %s by %s\n", v.Short, v.ID, v.At.Local().Format("2006-01-02 15:04"), v.Result, v.Actor)
+	fmt.Fprintf(c.out, "\n  %s\n\n", v.Intent)
+	if len(v.ChildIDs) > 0 {
+		fmt.Fprintf(c.out, "folds: %s\n", strings.Join(v.ChildIDs, ", "))
+	}
+	if len(v.Files) > 0 {
+		fmt.Fprintf(c.out, "files: %s\n", strings.Join(v.Files, ", "))
+	}
+	for _, m := range v.Marks {
+		fmt.Fprintf(c.out, "sentence: %s:%d  %s\n", m.Path, m.Line, m.Text)
+	}
+	return nil
+}
+
+func (c *cli) mark(args []string) error {
+	fs := c.flags("mark")
+	ids := fs.String("id", "", "the commits, separated by commas")
+	doc := fs.String("doc", "", "the document (default: the main document)")
+	under := fs.String("under", "", "the section a new sentence goes under")
+	inferred := fs.Bool("inferred", false, "it is a guess: for the inferred document unless the document says it")
+	propose := fs.Bool("propose", false, "the commits only may follow it: nobody has agreed")
+	confirm := fs.Bool("confirm", false, "this is what was meant")
+	why := fs.String("why", "", "why the commits follow it")
+	var by, via string
+	c.who(fs, &by, &via)
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		return errors.New("usage: tigwx mark [-id a1b2,c3d4] [-doc f.md] [-under title] [-inferred] [-propose] [-confirm] [-why why] <sentence>")
+	}
+	var refs []string
+	if *ids != "" {
+		refs = strings.Split(*ids, ",")
+	}
+	in := tig.MarkInput{Path: *doc, Under: *under, IDs: refs, Inferred: *inferred, By: by, Via: via, Actor: c.actor, Reason: *why}
+	if *confirm {
+		in.State = tig.IntentConfirmed
+	}
+	if *propose || *inferred {
+		in.Link = tig.LinkProposed
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	in.Sentence = strings.Join(fs.Args(), " ")
+	m, err := c.r.Mark(c.ctx, in)
+	if err != nil {
+		return err
+	}
+	return c.emit(m, func() { fmt.Fprintf(c.out, "%s:%d  %s  %s\n", m.Path, m.Line, strings.Join(m.IDs, " "), m.Text) })
+}
+
+// reverse finds which lines seem to be about which files, and proposes them when told to.
+func (c *cli) reverse(args []string) error {
+	fs := c.flags("reverse")
+	least := fs.Int("min", 0, "leave out candidates scoring under this, out of 100")
+	write := fs.Bool("write", false, "propose them: someone still has to agree")
+	by := fs.String("by", tig.ByTool, "who says so")
+	via := fs.String("via", tig.ViaReverse, "how it came about")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	res, err := c.r.Reverse(c.ctx)
+	if err != nil {
+		return err
+	}
+	kept := res.Candidates[:0:0]
+	for _, cand := range res.Candidates {
+		if cand.Score >= *least {
+			kept = append(kept, cand)
+		}
+	}
+	res.Candidates = kept
+	var written []tig.Described
+	if *write {
+		if written, err = c.r.ProposeReverse(c.ctx, res.Candidates, *by, *via, c.actor); err != nil {
+			return err
+		}
+	}
+	if c.asJSON {
+		return printJSON(c.out, map[string]any{"candidates": res.Candidates, "openLines": res.OpenLines, "openFiles": res.OpenFiles, "written": written})
+	}
+	for _, cand := range res.Candidates {
+		fmt.Fprintf(c.out, "%3d  %s:%d:%d-%d  %s\n", cand.Score, cand.Path, cand.Line, cand.From, cand.To, cand.Text)
+		fmt.Fprintf(c.out, "     files  %s\n     why    %s\n", strings.Join(cand.Files, ", "), tig.ClueReason(cand.Clues))
+	}
+	fmt.Fprintf(c.out, "%d candidates; %d lines and %d files with nothing found\n", len(res.Candidates), len(res.OpenLines), len(res.OpenFiles))
+	if *write {
+		fmt.Fprintf(c.out, "%d proposed; decide on each with tigwx link\n", len(written))
+	}
+	return nil
+}
+
+// describe says a line is about files already there.
+func (c *cli) describe(args []string) error {
+	fs := c.flags("describe")
+	var in tig.DescribeInput
+	fs.Var((*many)(&in.Files), "f", "a file")
+	fs.StringVar(&in.Path, "doc", "", "the document (default: the main document)")
+	fs.StringVar(&in.Under, "under", "", "the section a new sentence goes under")
+	fs.IntVar(&in.Line, "line", 0, "the 1-based line, to tell apart lines that say the same")
+	fs.StringVar(&in.Intent, "m", "", "the commit's one line (default: the sentence)")
+	fs.StringVar(&in.Reason, "why", "", "why the line goes with the files")
+	propose := fs.Bool("propose", false, "only propose it: nobody has agreed")
+	c.who(fs, &in.By, &in.Via)
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 || len(in.Files) == 0 {
+		return errors.New("usage: tigwx describe -f file... [-doc f.md] [-under title] [-line n] [-m intent] [-why why] [-propose] <sentence>")
+	}
+	if *propose {
+		in.Link = tig.LinkProposed
+	}
+	in.Sentence, in.Actor = strings.Join(fs.Args(), " "), c.actor
+	if err := c.open(); err != nil {
+		return err
+	}
+	d, err := c.r.Describe(c.ctx, in)
+	if err != nil {
+		return err
+	}
+	return c.emit(d, func() {
+		fmt.Fprintf(c.out, "%s:%d  %s  %s\n", d.Mark.Path, d.Mark.Line, short(d.Work.ID), d.Mark.Text)
+	})
+}
+
+// link records whether this code goes with this intent.
+func (c *cli) link(args []string) error {
+	fs := c.flags("link")
+	reject := fs.Bool("reject", false, "it does not")
+	var in tig.LinkDecision
+	fs.StringVar(&in.Reason, "m", "", "why")
+	c.who(fs, &in.By, &in.Via)
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return errors.New("usage: tigwx link [-reject] [-m why] <intent> <id>")
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	in.Intent, in.Work, in.Actor, in.State = fs.Arg(0), fs.Arg(1), c.actor, tig.LinkConfirmed
+	if *reject {
+		in.State = tig.LinkRejected
+	}
+	e, err := c.r.DecideLink(c.ctx, in)
+	if err != nil {
+		return err
+	}
+	return c.emit(e, func() { fmt.Fprintf(c.out, "%s %s %s\n", fs.Arg(0), short(e.Work), e.State) })
+}
+
+func (c *cli) fold(args []string) error {
+	fs := c.flags("fold")
+	intent := fs.String("m", "", "what the commits are, together")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if *intent == "" || fs.NArg() < 2 {
+		return errors.New("usage: tigwx fold -m intent <id> <id>...")
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	w, err := c.r.Fold(c.ctx, tig.FoldInput{Commits: fs.Args(), Intent: *intent, Actor: c.actor})
+	if err != nil {
+		return err
+	}
+	commits, err := c.r.Commits(c.ctx)
+	if err != nil {
+		return err
+	}
+	return c.emit(map[string]any{"short": commits.Short(w.ID), "id": w.ID, "folds": fs.Args()}, func() {
+		fmt.Fprintf(c.out, "%s folds %s\n", commits.Short(w.ID), strings.Join(fs.Args(), " "))
+	})
+}
+
+func (c *cli) unmark(args []string) error {
+	fs := c.flags("unmark")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	args = fs.Args()
+	if len(args) == 0 {
+		return errors.New("usage: tigwx unmark <id>...")
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	if err := c.r.Unmark(c.ctx, args); err != nil {
+		return err
+	}
+	return c.emit(map[string]any{"unmarked": args}, func() {})
+}
+
+func (c *cli) sync(args []string) error {
+	if err := c.parse(c.flags("sync"), args); err != nil {
+		return err
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	res, err := c.r.Sync(c.ctx, c.actor)
+	if err != nil {
+		return err
+	}
+	return c.emit(res, func() {
+		fmt.Fprintf(c.out, "%d documents rewritten, %d intents touched, %d moved, %d old marks converted\n", len(res.Docs), len(res.Touched), len(res.Moved), res.Migrated)
+		for _, i := range res.Touched {
+			fmt.Fprintf(c.out, "touched %s: confirm it again\n", i)
+		}
+	})
+}
+
+func (c *cli) decide(name string, args []string, do func(tig.DecideInput) (*tig.Intent, error), set func(fs *flag.FlagSet, in *tig.DecideInput)) error {
+	fs := c.flags(name)
+	var in tig.DecideInput
+	fs.StringVar(&in.Reason, "m", "", "why")
+	c.who(fs, &in.By, &in.Via)
+	if set != nil {
+		set(fs, &in)
+	}
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: tigwx %s <intent>", name)
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	in.Intent, in.Actor = fs.Arg(0), c.actor
+	i, err := do(in)
+	if err != nil {
+		return err
+	}
+	return c.emit(i, func() { fmt.Fprintf(c.out, "%s#%d  %s  %s\n", i.Short, i.Revision, i.State, i.Text) })
+}
+
+func (c *cli) confirm(args []string) error {
+	return c.decide("confirm", args, func(in tig.DecideInput) (*tig.Intent, error) { return c.r.ConfirmIntent(c.ctx, in) },
+		func(fs *flag.FlagSet, in *tig.DecideInput) {
+			fs.StringVar(&in.Under, "under", "", "the section of the main document it goes under")
+		})
+}
+
+func (c *cli) reject(args []string) error {
+	return c.decide("reject", args, func(in tig.DecideInput) (*tig.Intent, error) { return c.r.RejectIntent(c.ctx, in) }, nil)
+}
+
+func (c *cli) retire(args []string) error {
+	var with string
+	return c.decide("retire", args, func(in tig.DecideInput) (*tig.Intent, error) {
+		if with != "" {
+			in.From = []string{with}
+		}
+		return c.r.RetireIntent(c.ctx, in)
+	}, func(fs *flag.FlagSet, _ *tig.DecideInput) {
+		fs.StringVar(&with, "for", "", "the intent that took its place")
+	})
+}
+
+func (c *cli) accept(args []string) error {
+	fs := c.flags("accept")
+	reject := fs.Bool("reject", false, "record it as rejected")
+	reason := fs.String("m", "", "why")
+	var by, via string
+	c.who(fs, &by, &via)
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: tigwx accept [-reject] [-m why] <id>")
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	state := tig.WorkAccepted
+	if *reject {
+		state = tig.WorkRejected
+	}
+	a, err := c.r.Accept(c.ctx, tig.AcceptInput{Work: fs.Arg(0), State: state, By: by, Via: via, Actor: c.actor, Reason: *reason})
+	if err != nil {
+		return err
+	}
+	return c.emit(a, func() { fmt.Fprintf(c.out, "%s %s\n", short(a.Work), a.State) })
+}
+
+// showRef prints what a reference means.
+func (c *cli) showRef(ref string) error {
+	v, err := c.r.Show(c.ctx, ref)
+	if err != nil {
+		return err
+	}
+	if c.asJSON {
+		return printJSON(c.out, v)
+	}
+	switch {
+	case v.Intent != nil:
+		i := v.Intent
+		who := i.By
+		if i.Via != "" {
+			who = strings.TrimSpace(who + " via " + i.Via)
+		}
+		fmt.Fprintf(c.out, "%s#%d  %s", i.Short, i.Revision, i.State)
+		if who != "" {
+			fmt.Fprintf(c.out, " (%s)", who)
+		}
+		fmt.Fprintf(c.out, "\n  text   %s\n", i.Text)
+		for _, p := range i.Places {
+			fmt.Fprintf(c.out, "  place  %s:%d  %s\n", p.Path, p.Line, p.Ref)
+		}
+		for _, w := range i.Works {
+			fmt.Fprintf(c.out, "  work   %s %s #%d (%s, link %s)\n", w.Short, w.Kind, w.Revision, w.Acceptance, w.State)
+		}
+		if i.Previous != nil {
+			fmt.Fprintf(c.out, "  before %s %q", i.Previous.Ref, i.Previous.Text)
+			if i.Previous.Reason != "" {
+				fmt.Fprintf(c.out, ": %s", i.Previous.Reason)
+			}
+			fmt.Fprintln(c.out)
+		}
+		fmt.Fprintf(c.out, "  sync   %s\n", i.Sync)
+	case v.Line != nil:
+		fmt.Fprintf(c.out, "%s\n  text   %s\n", v.Line.Hash, v.Line.Text)
+		if v.Line.Range != "" {
+			fmt.Fprintf(c.out, "  range  %s\n", v.Line.Range)
+		}
+		for _, p := range v.Line.Places {
+			fmt.Fprintf(c.out, "  place  %s:%d\n", p.Path, p.Line)
+		}
+		for _, i := range v.Line.Intents {
+			fmt.Fprintf(c.out, "  intent %s\n", i)
+		}
+	case v.Work != nil:
+		fmt.Fprintf(c.out, "%s  %s  %s\n", v.Work.Short, v.Work.Acceptance, v.Work.Intent)
+		for _, f := range v.Work.Files {
+			fmt.Fprintf(c.out, "  file   %s\n", f)
+		}
+		for _, i := range v.Work.Intents {
+			fmt.Fprintf(c.out, "  intent %s\n", i)
+		}
+	case v.Event != nil:
+		fmt.Fprintf(c.out, "ev%s  %s %s #%d  %s via %s  %s\n", v.Event.ID[:8], v.Event.Short, v.Event.Kind, v.Event.Revision, v.Event.By, v.Event.Via, v.Event.Reason)
+	}
+	return nil
+}
+
+func (c *cli) baseline(args []string) error {
+	fs := c.flags("baseline")
+	intent := fs.String("m", "the project as it was before tig", "what it is")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	w, err := c.r.Baseline(c.ctx, *intent, c.actor)
+	if err != nil {
+		return err
+	}
+	commits, err := c.r.Commits(c.ctx)
+	if err != nil {
+		return err
+	}
+	return c.emit(map[string]any{"short": commits.Short(w.ID), "work": w}, func() { fmt.Fprintf(c.out, "%s  %s\n", commits.Short(w.ID), w.Intent) })
+}
+
+// basis turns block references into hashes.
+func (c *cli) basis(refs []string) ([]string, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	ch, err := c.r.Chain(c.ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, ref := range refs {
+		b, err := ch.Block(ref)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b.Hash)
+	}
+	return out, nil
+}
+
+func (c *cli) workStart(args []string) error {
+	fs := c.flags("work start")
+	intent := fs.String("m", "", "what the work is meant to do")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if *intent == "" {
+		return &flagError{fs.Name(), errors.New("say what the work is for: -m intent")}
+	}
+	basis, err := c.basis(fs.Args())
+	if err != nil {
+		return err
+	}
+	w, err := c.r.StartWork(c.ctx, basis, *intent, c.actor)
+	if err != nil {
+		return err
+	}
+	return c.emit(w, func() { fmt.Fprintf(c.out, "work started (snapshot %s)\n", short(w.Before)) })
+}
+
+func (c *cli) workStep(args []string) error {
+	fs := c.flags("work step")
+	kind := fs.String("kind", "", "edit, command, install, check, decision or note")
+	note := fs.String("m", "", "what was done")
+	command := fs.String("command", "", "the command that was run")
+	exit := fs.Int("exit", 0, "its exit code")
+	output := fs.String("output", "", "a file with its output (- for stdin)")
+	detail := fs.String("detail", "", "a decision's question and answer, or a longer note")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	switch *kind {
+	case tig.StepEdit, tig.StepCommand, tig.StepInstall, tig.StepCheck, tig.StepDecision, tig.StepNote:
+	default:
+		return &flagError{fs.Name(), fmt.Errorf("unknown step kind %q (edit, command, install, check, decision, note)", *kind)}
+	}
+	in := tig.StepInput{Kind: *kind, Note: *note, Command: *command, Detail: *detail, Actor: c.actor}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "exit" {
+			in.Exit = exit
+		}
+	})
+	if *kind == tig.StepCheck && in.Exit == nil {
+		return &flagError{fs.Name(), errors.New("a check needs its -exit code")}
+	}
+	if *output != "" {
+		var data []byte
+		var err error
+		if *output == "-" {
+			data, err = io.ReadAll(os.Stdin)
+		} else {
+			data, err = os.ReadFile(*output)
+		}
+		if err != nil {
+			return err
+		}
+		in.Output = string(data)
+	}
+	var err error
+	if in.Basis, err = c.basis(fs.Args()); err != nil {
+		return err
+	}
+	s, err := c.r.RecordStep(c.ctx, in)
+	if err != nil {
+		return err
+	}
+	if c.asJSON {
+		return printJSON(c.out, s)
+	}
+	fmt.Fprintf(c.out, "step %s (%s)\n", short(s.ID), s.Kind)
+	if s.Before != "" && s.After != "" {
+		changes, err := tig.DiffTrees(c.ctx, c.r.Objects, s.Before, s.After)
+		if err != nil {
+			return err
+		}
+		printChanges(c.out, "  ", changes)
+	}
+	return nil
+}
+
+func (c *cli) workFinish(args []string) error {
+	fs := c.flags("work finish")
+	result := fs.String("result", "", "passed, failed, done, rolled-back or abandoned (default: from the checks)")
+	approvers := fs.String("approver", "", "comma-separated: who approved the work")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	switch *result {
+	case "", tig.ResultPassed, tig.ResultFailed, tig.ResultDone, tig.ResultRolledBack, tig.ResultAbandoned:
+	default:
+		return &flagError{fs.Name(), fmt.Errorf("unknown result %q", *result)}
+	}
+	var who []string
+	for _, a := range strings.Split(*approvers, ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			who = append(who, a)
+		}
+	}
+	w, err := c.r.FinishWork(c.ctx, *result, who)
+	if err != nil {
+		return err
+	}
+	return c.emit(w, func() { fmt.Fprintf(c.out, "work %s: %s, %d steps\n", short(w.ID), w.Result, len(w.Steps)) })
+}
+
+func (c *cli) mcp(args []string) error {
+	fs := c.flags("mcp")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	s := mcpserver.New(c.r, mcpserver.Options{Version: version})
+	return s.Run(c.ctx, &mcp.StdioTransport{})
+}
+
+func (c *cli) push(args []string) error {
+	fs := c.flags("push")
+	token := fs.String("token", os.Getenv("TIG_TOKEN"), "the owner's token on the hub (default $TIG_TOKEN)")
+	note := fs.String("m", "", "a note for this publication")
+	if err := c.parse(fs, args); err != nil {
+		return err
+	}
+	project := os.Getenv("TIG_HUB")
+	if fs.NArg() > 0 {
+		project = fs.Arg(0)
+	}
+	if project == "" {
+		return &flagError{fs.Name(), errors.New("push needs the project's address on a hub: tigwx push http://host/owner/name (or $TIG_HUB)")}
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	res, err := hub.Push(c.ctx, c.r, project, *token, c.actor, *note)
+	if len(res.Unsnapped) > 0 {
+		fmt.Fprintf(c.errs, "these documents changed since the latest snapshot and are pushed as it has them (run tigwx snap): %s\n",
+			strings.Join(res.Unsnapped, ", "))
+	}
+	if err != nil {
+		return err
+	}
+	if c.asJSON {
+		return printJSON(c.out, res)
+	}
+	if res.UpToDate {
+		fmt.Fprintf(c.out, "up to date: %s has these documents and this chain (publication %s)\n", project, short(res.Publication.ID))
+		return nil
+	}
+	fmt.Fprintf(c.out, "pushed publication %s to %s (%d objects sent)\n", short(res.Publication.ID), project, res.Sent)
+	return nil
+}

@@ -1,0 +1,62 @@
+# Building on tig
+
+tig records and does not judge, so whatever decides, runs or asks sits on top of it: a person at the command line, a CI job, a review board, an editor, an agent harness. Anything on top can use all of tig three ways, and none of them needs any other:
+
+| | How | For |
+|---|---|---|
+| Command line | `tigprint <command> -json` | scripts, CI, any language |
+| Go | `github.com/h94u041/tig` | programs in Go |
+| Files | the [format](format.md) | reading or writing `.tig` with no tig code at all |
+
+Agents get a fourth way, the [MCP server](mcp.md), which can propose but not decide.
+
+## Your words, not tig's
+
+Every decision records who made it and how it came about: `by` and `via`. tig gives these no meaning. `by` is `human`, `ai`, `tool` or a word of your own; `via` is free text. Say your own ways of working here and read them back later:
+
+```sh
+tigprint accept -by alice -via review-board 7f3a
+tigprint mark -inferred -by shopbot -via nightly-scan -id 7f3a "Receipts are printed."
+```
+
+The only meaning tig attaches: a link marked as a person's word (`by human`, the default on the command line) starts confirmed, and everything else starts proposed. Pass `-propose` to say otherwise. A tool that wants its own users' names as `by` should also pass `-propose`, and confirm through `tigprint link`.
+
+## The flow
+
+```sh
+tigprint init                          # asks nothing, records no commit, leaves the documents alone
+tigprint reverse -json                 # which lines seem to be about which files
+tigprint reverse -write -via my-tool   # propose them; nothing binds yet
+tigprint set -json -s "A sentence."    # what's on a line: intents, links, states
+tigprint link -by alice <intent> <id>  # this code goes with this intent
+tigprint link -reject <intent> <id>    # it does not, and it won't be proposed again
+```
+
+Work is recorded the same way, with whatever does it:
+
+```sh
+tigprint work start -m "print receipts"
+# ... change files ...
+tigprint work step -kind edit -m "prints"
+tigprint work finish -result done
+tigprint mark -inferred -by my-agent -via my-tool -id <id> "Receipts are printed."
+tigprint accept -by alice <id>         # accepting a commit carries the links it proposed
+tigprint check -json                   # exit status 1 when the chain is not closed
+```
+
+Editing a line and running `tigprint sync` moves what the edit did not reach and asks again about what it did. To say it all at once instead, `tigprint init -force` makes the code there one commit and has every line go with it, proposed.
+
+## Two questions, kept apart
+
+- **Is this what the line means?** The intent's state: `proposed`, `confirmed`, and so on. `confirm`, `reject`, `retire`.
+- **Does this code go with it?** The link's state: `proposed`, `confirmed`, or rejected and then gone. `link`, or `accept` on the commit.
+
+A tool often wants to ask them together: when someone agrees with a correspondence, also confirm the intent if nobody has. That is the tool's choice, and tig records both.
+
+## What binds
+
+A commit that changed files stands on a line as soon as something says so, and waits as a candidate. A commit from `describe` or `reverse -write` changed nothing: it is only a reading of the code, so until someone agrees it is not in a sentence's `ids`, does not put files in a group and does not close the chain. Sentences show it in `intents[].links[]`, with its state and reason, whichever it is.
+
+## Reading the answers
+
+`-json` answers are objects and lists with stable names, and new names may appear, so ignore what you don't know. Flags go before other arguments. Only `check` uses exit status 1, for a chain that is not closed; anything that went wrong is 2.

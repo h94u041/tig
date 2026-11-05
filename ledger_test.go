@@ -183,12 +183,12 @@ func TestInferredDocument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	guess := mark(t, r, tig.MarkInput{Sentence: "A guess.", Under: "Guesses", IDs: []string{w.ID}, Inferred: true, By: tig.ByAI, Via: tig.ViaAnalysis})
+	guess := mark(t, r, tig.MarkInput{Sentence: "A guess.", Under: "Guesses", IDs: []string{w.ID}, Inferred: true, By: tig.ByAI, Via: "analysis"})
 	if guess.Path != "inferred.md" {
 		t.Fatalf("%+v", guess)
 	}
 	s := sentenceOf(t, r, "A guess.")
-	if !s.Inferred || s.Intents[0].State != tig.IntentProposed || s.Intents[0].Via != tig.ViaAnalysis {
+	if !s.Inferred || s.Intents[0].State != tig.IntentProposed || s.Intents[0].Via != "analysis" {
 		t.Fatalf("%+v", s)
 	}
 	a, _ := r.Analyze(ctx, "")
@@ -198,12 +198,12 @@ func TestInferredDocument(t *testing.T) {
 	if set := a.Relations(ctx).Set(tig.SetInput{Commits: []string{w.ID[:4]}}); len(set.Sentences) != 0 {
 		t.Fatalf("a set does not bring in guesses by itself: %+v", set.Sentences)
 	}
-	// What the main document already says is not a guess.
-	said := mark(t, r, tig.MarkInput{Sentence: "What a person said.", IDs: []string{w.ID}, Inferred: true, By: tig.ByAI, Via: tig.ViaBuilder})
+	// The words of the main document stay where they are; nobody confirmed them.
+	said := mark(t, r, tig.MarkInput{Sentence: "What a person said.", IDs: []string{w.ID}, Inferred: true, By: tig.ByAI, Via: "builder"})
 	if said.Path != "d.md" {
 		t.Fatalf("%+v", said)
 	}
-	if s := sentenceOf(t, r, "What a person"); s.Inferred || s.Intents[0].State != tig.IntentConfirmed {
+	if s := sentenceOf(t, r, "What a person"); s.Inferred || s.Intents[0].State != tig.IntentProposed || s.Intents[0].By != tig.ByAI {
 		t.Fatalf("%+v", s)
 	}
 
@@ -219,7 +219,7 @@ func TestInferredDocument(t *testing.T) {
 		t.Fatalf("its work comes with it: %+v", s.IDs)
 	}
 
-	second := mark(t, r, tig.MarkInput{Sentence: "Wrong guess.", Inferred: true, By: tig.ByAI, Via: tig.ViaAnalysis})
+	second := mark(t, r, tig.MarkInput{Sentence: "Wrong guess.", Inferred: true, By: tig.ByAI, Via: "analysis"})
 	wrong := sentenceOf(t, r, "Wrong guess.")
 	if _, err := r.RejectIntent(ctx, tig.DecideInput{Intent: wrong.Intents[0].Short, By: tig.ByHuman}); err != nil {
 		t.Fatal(err)

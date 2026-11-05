@@ -35,13 +35,24 @@ An intent is what a line, or a part of one, means. It has an identity that outli
 | `split`, `composed`, `superseded` | made out of others, or replaced by another |
 | `deprecated`, `rejected` | it no longer stands, or never did |
 
-Each event records `by` (`human` or `ai`) and `via` (`direct`, `smooth`, `analysis`, `builder`, `planner`, `migrated`), so an AI's decision can always be told from a person's. Code: [ledger.go](../ledger.go).
+Each event records `by` (`human`, `ai`, `tool`, or a word of your own) and `via` (free text: what tig itself writes is `direct`, `agent`, `migrated`, `init`, `reverse`, and a tool on top says its own), so an AI's decision can always be told from a person's. Code: [ledger.go](../ledger.go).
 
-Commits link to an intent at a revision, as `implements`, `fixes`, `refactors`, `tests`, `reverts` or `unlinked`. A commit is a **candidate** until someone records it accepted or rejected. Commits older than the ledger, the baseline and folded commits count as accepted; a rejected commit's links count for nothing, and undoing its code is a separate act.
+Commits link to an intent at a revision, as `implements`, `fixes`, `refactors`, `tests`, `reverts`, `describes` or `unlinked`. Whether the intent is right and whether this code goes with it are two questions, so a link has a state of its own: `proposed`, `confirmed` or `rejected`. A person's word starts confirmed and anyone else's proposed. A rejected link is remembered, and nobody proposing it again brings it back.
+
+A commit is a **candidate** until someone records it accepted or rejected. Accepting one carries the links it proposed. Commits older than the ledger, the baseline, folded commits and descriptions count as accepted; a rejected commit's links count for nothing, and undoing its code is a separate act.
+
+## Connecting what is already there
+
+`tigwx init` asks nothing, records no commit and leaves the documents alone, so a project that came with code starts unconnected. There are two ways to connect it:
+
+- **All at once.** `tigwx init -force` makes everything there one commit, the baseline, and has every line go with it. Each line gets an intent, proposed `via init`, because nobody has said what it means. It can run again: lines that have an intent are left alone.
+- **By reading.** `tigwx reverse` looks for what the lines point at: a Markdown link to a file (95 out of 100), inline code naming a file or a folder (90), a path written out (75), inline code naming a symbol found in five files or fewer (60, less the more files), a section titled like a folder (30, on its first line only). Each covers the sentence it is in, not the whole line. It uses no model and writes nothing, and it also lists the lines and files nothing was found for, for someone to read.
+
+`tigwx reverse -write` and `tigwx describe` write a correspondence down as a commit of the kind `described`: it changed nothing and reaches those files. Until someone agrees (`tigwx link`) it is only a reading of the code: it binds nothing and closes nothing. Code: [reverse.go](../reverse.go).
 
 ## What an edit does
 
-`tigprint sync` (and anything that writes a mark) reads every document. A line whose text is not what its mark holds gets a new hash and a new mark, and the intents on it follow by comparing the old and new text from both ends:
+`tigwx sync` (and anything that writes a mark) reads every document. A line whose text is not what its mark holds gets a new hash and a new mark, and the intents on it follow by comparing the old and new text from both ends:
 
 - a range before the change stays;
 - a range after it shifts;
@@ -51,7 +62,7 @@ Two changes in one line count as one region, so an edit may touch more intents t
 
 ## The inferred document
 
-Sentences nobody has agreed with go in a separate document, `inferred` in `.tig/config`, by default `inferred.md` beside the main document. It is not design: it is outside the chain and not an orphan. An agent's `mark_sentence` lands there unless the main document already says the sentence. Confirming an intent moves its line into the main document; rejecting it takes the line away.
+Sentences nobody has agreed with go in a separate document, `inferred` in `.tig/config`, by default `inferred.md` beside the main document. It is not design: it is outside the chain and not an orphan. An agent's `mark_sentence` lands there unless the document already says the sentence; then the words stand as they are and only the link is proposed. Confirming an intent moves its line into the main document; rejecting it takes the line away.
 
 ## References
 
@@ -67,7 +78,7 @@ Anything tig records can be named:
 | `a1b2` | a commit |
 | `ev91c0` | an event |
 
-Events take `ev` and not a single letter because a commit's hash can start with any hexadecimal digit. `tigprint show <reference>` and the `resolve` tool give the same answer, including where it is now, what followed it, the revision before, and whether it is in sync. Code: [show.go](../show.go).
+Events take `ev` and not a single letter because a commit's hash can start with any hexadecimal digit. `tigwx show <reference>` and the `resolve` tool give the same answer, including where it is now, what followed it, the revision before, and whether it is in sync. Code: [show.go](../show.go).
 
 ## Lineage
 
@@ -87,7 +98,7 @@ The chain starts at the main document (`root` in `.tig/config`, `README.md` unle
 
 ## Closure
 
-`tigprint check`, and the `check` tool over MCP, report:
+`tigwx check`, and the `check` tool over MCP, report:
 
 - **broken**: links to files that do not exist, orphan documents, and marks that name nothing the ledger knows (`broken-mark`);
 - **stale**: a file built for a block whose design has changed since while the file did not follow; a built file changed outside the footprint, or gone; a proposed link whose file has changed; a line whose text moved on with no commit following it (`intent-changed`); a file a line's commits built changed outside any commit, or gone (`code-away`); a line still in the old format (`unsynced`); a confirmed intent nobody has looked at since it changed (`review`); a confirmed intent whose line is in no document (`intent-missing`). Code: [links.go](../links.go);

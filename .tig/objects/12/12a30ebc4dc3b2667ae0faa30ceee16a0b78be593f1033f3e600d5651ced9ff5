@@ -1,0 +1,7 @@
+tig-step 1
+kind edit
+before a0d78493f5e89a1ec832ee790958b67f730318b5fb1ec98041e7274b18f4366e
+after a943101c785a81d2bd5303489a5695714cb12a712f2001d7be1b59a9e4dddefc
+note tests run on every system before a release is tagged
+actor claude
+at 2026-11-05T18:15:53.5355156Z

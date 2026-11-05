@@ -741,6 +741,7 @@ func (a *Analysis) footprintOfMarks(ctx context.Context, lastTouch map[string]st
 					unsynced[i.ID] = true
 				}
 				var shorts []string
+				var said []SentenceLink
 				for _, e := range l.LinksOf(i.ID) {
 					w, err := a.commits.Resolve(e.Work)
 					if err != nil {
@@ -751,8 +752,24 @@ func (a *Analysis) footprintOfMarks(ctx context.Context, lastTouch map[string]st
 					if l.AcceptanceOf(w) == WorkRejected {
 						continue
 					}
-					shorts = appendNew(shorts, a.commits.ShowAs(w.ID))
 					bound[w.ID] = true
+					state := l.LinkState(e)
+					link := SentenceLink{Commit: a.commits.ShowAs(w.ID), Kind: e.Kind, State: state, Acceptance: l.AcceptanceOf(w), By: e.By, Via: e.Via, Reason: e.Reason}
+					// The baseline stands for everything: listing it says nothing.
+					if w.Result != ResultBaseline {
+						for _, leaf := range a.commits.Leaves(w.ID) {
+							for _, f := range a.workFiles[leaf] {
+								link.Files = appendNew(link.Files, f)
+							}
+						}
+					}
+					said = append(said, link)
+					// A description changed nothing: until someone agrees, it is only
+					// a reading of the code and binds nothing.
+					if w.Result == ResultDescribed && state != LinkConfirmed {
+						continue
+					}
+					shorts = appendNew(shorts, a.commits.ShowAs(w.ID))
 					for _, leaf := range a.commits.Leaves(w.ID) {
 						bound[leaf] = true
 						leaves = appendNew(leaves, leaf)
@@ -767,7 +784,7 @@ func (a *Analysis) footprintOfMarks(ctx context.Context, lastTouch map[string]st
 						ref.N = s.N
 					}
 					s.Intents = append(s.Intents, SentenceIntent{Ref: ref.String(), Short: i.Short, Text: i.Text, State: i.State, Revision: i.Revision,
-						Review: i.Review, By: i.By, Via: i.Via, From: sp.From, To: sp.To, Commits: shorts})
+						Review: i.Review, By: i.By, Via: i.Via, From: sp.From, To: sp.To, Commits: shorts, Links: said})
 				}
 				for _, short := range shorts {
 					s.IDs = appendNew(s.IDs, short)
@@ -825,7 +842,13 @@ func (a *Analysis) footprintOfMarks(ctx context.Context, lastTouch map[string]st
 			}
 			continue
 		}
-		links := l.LinksOf(i.ID)
+		var links []LinkEvent
+		for _, e := range l.LinksOf(i.ID) {
+			if w, err := a.commits.Resolve(e.Work); err == nil && w.Result == ResultDescribed && l.LinkState(e) != LinkConfirmed {
+				continue
+			}
+			links = append(links, e)
+		}
 		followed := len(links) == 0
 		for _, e := range links {
 			followed = followed || e.Revision >= i.Revision

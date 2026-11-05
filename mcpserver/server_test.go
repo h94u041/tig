@@ -100,7 +100,7 @@ func TestTools(t *testing.T) {
 	cs := connect(t, r, "agent-a")
 
 	tools, err := cs.ListTools(context.Background(), nil)
-	if err != nil || len(tools.Tools) != 17 {
+	if err != nil || len(tools.Tools) != 19 {
 		t.Fatalf("tools: %v %v", tools, err)
 	}
 	o := call[overviewOut](t, cs, "overview", nil)

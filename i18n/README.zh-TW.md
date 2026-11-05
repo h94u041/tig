@@ -9,7 +9,7 @@
 
 > 本文是 [README.md](../README.md) 的翻譯。英文版是原本，也是 tig 檢查的那一份；兩者不一致時以英文版為準。
 
-> 這個 tig 不是 [tig，Git 的文字介面工具](https://github.com/jonas/tig)。因此它的指令叫做 `tigprint`。
+> 這個 tig 不是 [tig，Git 的文字介面工具](https://github.com/jonas/tig)。因此它的指令叫做 `tigwx`。
 
 ## 為什麼需要 tig
 
@@ -43,14 +43,14 @@ tig 不做的事：它不執行檢查、不下判定，agent 記下的檢查只�
 
 ## 功能
 
-- **為你的專案提供 MCP 伺服器。** `tigprint mcp` 把文件和足跡提供給任何 MCP 用戶端（Claude Code、Cursor 等）：總覽、關鍵字搜尋、閱讀並循著設計區塊前進、每個區塊或檔案的足跡、閉合檢查，以及記錄新工作的工具。
+- **為你的專案提供 MCP 伺服器。** `tigwx mcp` 把文件和足跡提供給任何 MCP 用戶端（Claude Code、Cursor 等）：總覽、關鍵字搜尋、閱讀並循著設計區塊前進、每個區塊或檔案的足跡、閉合檢查，以及記錄新工作的工具。
 - **文件串成一條鏈。** 主文件、它的細節文件，以及它們連結到的檔案，被當作一個整體來讀。每個文字區塊以其內容雜湊命名，tig 依固定、可重算的規則，追蹤每個區塊經過的編輯、移動、拆分與合併。
 - **把行綁到程式碼。** 文件的一行帶一個標記 `方塊一次轉一層。 <tig l="c3d4e5"/>`，在任何 Markdown 檢視器裡都看不到。其餘都在帳本裡：這一行的意圖、每個意圖涵蓋的字元範圍（可以任意重疊），以及跟著每個意圖的 commit。改了這行就會有新的雜湊，只有改動碰到的意圖才需要再看一次。行或程式碼有一邊動了另一邊沒跟上，`check` 會指出來。
 - **忠實的足跡。** 每一份 *work*（一次建構，類似一個 commit）記錄它所服務的設計、它的意圖、建構前後的專案，以及它的 *steps*：每一次編輯和它確切改動的檔案、每一個指令、檢查與決定。
 - **agent 層級的重現。** 足跡完整到足以讓第二個 agent 只拿著文件和足跡，就重建出第一個 agent 建出的東西。tig 自己的測試就是這樣做的。
 - **閉合檢查。** 失效的連結與標記、等著再看一次的已確認意圖、在足跡之外被修改或因設計變更而被遺留的程式碼，以及沒有任何設計涵蓋到的檔案。
 - **決定都有紀錄。** 每個意圖由某人提出、確認、修改或淘汰，分得出是人還是 AI；每個 commit 在被接受或拒絕之前都是候選。事件只增不改，取聯集就能合併。tig 不執行任何東西。
-- **可以發布的 hub。** `tigprint push` 把文件和鏈（絕不包含程式碼）送到 `tighub`；hub 會檢查每一次推送，並逐區塊顯示每份文件。
+- **可以發布的 hub。** `tigwx push` 把文件和鏈（絕不包含程式碼）送到 `tighub`；hub 會檢查每一次推送，並逐區塊顯示每份文件。
 - **安全且可攜。** 每次讀取都會比對物件和它的雜湊，來自他人 tree 的路徑無法跳出專案，同時寫入的程序也不會遺失紀錄。格式是純文字、有版本，並且打算長久使用。
 
 ## 使用情境
@@ -63,10 +63,19 @@ tig 不做的事：它不執行檢查、不下判定，agent 記下的檢查只�
 
 ## 安裝
 
-需要 Go 1.25 或更新版本：
+從 [Releases](https://github.com/h94u041/tig/releases) 下載你系統的安裝檔執行，不需要其他東西。在 Windows 上會裝到 `%LOCALAPPDATA%\Programs\tigwx`、加進 PATH，並出現在已安裝的程式清單裡。其他系統會裝到 `~/.local/bin`，那裡不在 PATH 上時會告訴你要加哪一行。`-dir`、`-yes`、`-portable`、`-uninstall` 分別是指定位置、不詢問、只放檔案、解除安裝。同一處也有只含程式的壓縮檔和 `SHA256SUMS`。安裝檔目前沒有簽章，Windows 和 macOS 可能會在執行前警告。
+
+或是用 Go 1.25 或更新版本：
 
 ```sh
-go install github.com/h94u041/tig/cmd/tigprint@latest
+go install github.com/h94u041/tig/cmd/tigwx@latest
+```
+
+指令叫 `tigwx`，因為 `tig` 已經是一個知名的 Git 瀏覽工具，常跟 Git 一起裝進來。
+
+```sh
+tigwx --version
+tigwx --help
 ```
 
 hub 是另一個指令：`go install github.com/h94u041/tig/cmd/tighub@latest`。
@@ -76,11 +85,11 @@ hub 是另一個指令：`go install github.com/h94u041/tig/cmd/tighub@latest`�
 在一個主文件為 `README.md` 的專案中：
 
 ```sh
-tigprint init              # 在這裡建立 .tig
-tigprint chain             # 鏈上的每個文字區塊
-tigprint check             # 鏈閉合了嗎？（未閉合時結束碼為 1）
-tigprint mark -confirm "方塊的一層會轉動。"   # 說明一行的意思
-tigprint show i7f3a        # 任何參照的意思
+tigwx init              # 在這裡建立 .tig
+tigwx chain             # 鏈上的每個文字區塊
+tigwx check             # 鏈閉合了嗎？（未閉合時結束碼為 1）
+tigwx mark -confirm "方塊的一層會轉動。"   # 說明一行的意思
+tigwx show i7f3a        # 任何參照的意思
 ```
 
 標記一行時，會在行尾寫一個小標記，並在帳本裡記下意圖：
@@ -94,16 +103,16 @@ tigprint show i7f3a        # 任何參照的意思
 接著連接你的 agent。以 Claude Code 為例：
 
 ```sh
-claude mcp add tig -- tigprint mcp
+claude mcp add tig -- tigwx mcp
 ```
 
 或寫在任何 MCP 用戶端的設定中：
 
 ```json
-{ "mcpServers": { "tig": { "command": "tigprint", "args": ["mcp"] } } }
+{ "mcpServers": { "tig": { "command": "tigwx", "args": ["mcp"] } } }
 ```
 
-`tigprint mcp` 服務它啟動時所在的專案（或用 `-C dir` 指定）。
+`tigwx mcp` 服務它啟動時所在的專案（或用 `-C dir` 指定）。
 
 ## 運作方式
 
@@ -119,28 +128,30 @@ tig 有三個部分，加上一個可以發布的 hub，各有自己的文件（
 
 ### MCP
 
-`tigprint mcp` 提供給 agent 的工具與資源、agent 如何使用它們，以及保障安全的機制。見 [MCP 伺服器](../docs/mcp.md)。
+`tigwx mcp` 提供給 agent 的工具與資源、agent 如何使用它們，以及保障安全的機制。見 [MCP 伺服器](../docs/mcp.md)。
 
 ### Hub
 
-`tigprint push` 把專案的文件和鏈（僅此而已）送到 hub，也就是 `tighub`，讓人們像在 Git 平台上閱讀儲存庫一樣閱讀它們。見 [hub](../docs/hub.md)。
+`tigwx push` 把專案的文件和鏈（僅此而已）送到 hub，也就是 `tighub`，讓人們像在 Git 平台上閱讀儲存庫一樣閱讀它們。見 [hub](../docs/hub.md)。
 
 ## 指令
 
-單獨執行 `tigprint` 會列出所有指令及其選項。程式碼在 [cmd/tigprint](../cmd/tigprint/)。
+單獨執行 `tigwx` 會列出所有指令及其選項。程式碼在 [cmd/tigwx](../cmd/tigwx/)。
 
 | 指令 | 作用 |
 |---|---|
-| `init` | 在此資料夾建立 tig（`-root` 主文件） |
+| `init` | 在此資料夾建立 tig（`-root` 主文件）；什麼都不問，也不寫 commit。`-force`：現有程式碼算成一個 commit，每一行都連到它 |
 | `snap`、`log`、`diff`、`restore` | 快照：拍一張、列出、比較、把檔案還原 |
 | `blocks <file.md>` | 一份文件的文字區塊及其雜湊 |
 | `chain` | 鏈上的每個區塊 |
 | `show <區塊或參照>` | 單一區塊，或參照的意思：`i7f3a`、`i7f3a#2`、`lc3d4e5:5-14`、`a1b2`、`ev91c0` |
 | `search <words>` | 包含所有關鍵字的區塊、works、steps 與檔案 |
-| `check` | 閉合報告；`-json` |
+| `check` | 閉合報告 |
 | `trail <block or file>` | 為它所做的 works；`-steps` 顯示每一步及其改動的檔案 |
 | `work start`、`work step`、`work finish` | 手動留下足跡 |
 | `mark`、`sync`、`unmark` | 說明一行的意思；讓帳本跟上改過的行；撤回已撤銷的 commit |
+| `reverse`、`describe`、`link` | 不用模型，找出哪幾行在講哪些檔案；說明一行在講已存在的檔案；決定這段程式碼是否對應這個意圖 |
+| `set`、`groups` | 一件工作需要什麼；哪些東西屬於一起 |
 | `confirm`、`reject`、`retire`、`accept` | 記下對意圖或 commit 的決定 |
 | `mcp` | 透過 stdin 和 stdout 以 MCP 提供這個 tig |
 | `push [-token t] [-m note] <url>` | 把文件和鏈送到 hub |

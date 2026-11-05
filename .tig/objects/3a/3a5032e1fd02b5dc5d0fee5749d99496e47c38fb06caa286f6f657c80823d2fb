@@ -30,8 +30,15 @@ and the chain of its documents, checked and served to agents over MCP.
 
 Usage: tigprint [-C dir] [-actor name] [-session name] <command> [arguments]
 
+Every command but mcp takes -json and answers in JSON instead. Give flags before
+the other arguments. Decisions and marks take -by (human, ai, tool, or your own
+word; default human) and -via (your own word for how it came about; default
+direct), and tig keeps what it is told.
+
 Project
-  init [-root README.md] [-strict] [-outside path,...]  start a tig in this folder
+  init [-root README.md] [-outside path,...] [-force]    start a tig in this folder; it asks nothing and records
+                                                         no commit. -force: the code there is one commit, and
+                                                         every line of the documents goes with it
   snap [-reason why]                                     record the project as it is
   log [-n 20]                                            the snapshots, newest first
   diff [from [to]]                                       what changed (default: the last snapshot and now)
@@ -43,7 +50,7 @@ Chain
   show <block|reference>                                 one block: its text, details and what was built for it; or
                                                          what a reference means: i7f3a, i7f3a#2, lc3d4e5:5-14, a1b2, ev91c0
   search <words>                                         blocks, works, steps and files containing every word
-  check [-json]                                          is the chain closed? (exit status 1 when not)
+  check                                                  is the chain closed? (exit status 1 when not)
 
 Footprint
   trail [-steps] [-n 20] <block|file>                    the works done for a block or a file
@@ -55,18 +62,24 @@ Footprint
   work status                                            the work in progress
   commits [-n 20]                                        the commits, newest first, by short ID
   commit <id>                                            one commit: its files, its sentences, what it folds
-  set [-json] [-s sentence] [-id a1b2] [-f file]...      what a piece of work needs: sentences, commits, files
-  groups [-json]                                         the sentences, commits and files that belong together
+  set [-s sentence] [-i i7f3a] [-id a1b2] [-f file]...   what a piece of work needs: sentences, commits, files
+  groups                                                 the sentences, commits and files that belong together
 
 Marks
-  mark [-id a1b2,c3d4] [-doc f.md] [-under title] [-inferred] [-confirm] <sentence>
+  mark [-id a1b2,c3d4] [-doc f.md] [-under title] [-inferred] [-propose] [-confirm] <sentence>
                                                          say what a line or a part of it means, and which commits
                                                          follow it. -inferred: a guess, for the inferred document
-                                                         unless the main document says it already
+                                                         unless the document says it already. -propose: the
+                                                         commits only may follow it. -confirm: it is what was meant
+  reverse [-min n] [-write]                              which lines seem to be about which files, by what they
+                                                         point at, with no model. -write: propose them
+  describe -f file... [-doc f.md] [-under title] [-line n] [-m intent] [-why why] [-propose] <sentence>
+                                                         a line is about files already there; nothing changes
+  link [-reject] [-m why] <intent> <id>                  whether this code goes with this intent
   sync                                                   bring the ledger up to edited lines; old marks are converted
   confirm [-under title] [-m why] <intent>               it is what was meant; out of the inferred document if there
   reject [-m why] <intent>                               it is not what was meant
-  retire [-by i1a2b] [-m why] <intent>                   it no longer stands, or another took its place
+  retire [-for i1a2b] [-m why] <intent>                  it no longer stands, or another took its place
   accept [-reject] [-m why] <id>                         record a decision on a commit; tig judges nothing
   fold -m intent <id> <id>...                            fold commits under a new one; none disappear
   unmark <id>...                                         withdraw undone commits from what they followed; the sentences stay
@@ -100,6 +113,23 @@ type cli struct {
 	actor   string
 	session string
 	r       *tig.Repo
+	asJSON  bool // -json
+}
+
+// emit answers in JSON when asked to, and otherwise lets text do it.
+func (c *cli) emit(v any, text func()) error {
+	if c.asJSON {
+		return printJSON(c.out, v)
+	}
+	text()
+	return nil
+}
+
+// who adds -by and -via. tig keeps whatever it is told: a tool on top of it says
+// its own ways of working here.
+func who(fs *flag.FlagSet, by, via *string) {
+	fs.StringVar(by, "by", tig.ByHuman, "who says so: human, ai, tool, or your own word")
+	fs.StringVar(via, "via", tig.ViaDirect, "how it came about, in your own word")
 }
 
 // errNotClosed ends check with exit status 1 and nothing more to say.
@@ -132,8 +162,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		"trail": c.trail, "work": c.work, "mcp": c.mcp, "push": c.push,
 		"commits": c.commits, "commit": c.commit, "mark": c.mark, "fold": c.fold, "unmark": c.unmark, "baseline": c.baseline,
 		"sync": c.sync, "confirm": c.confirm, "reject": c.reject, "retire": c.retire, "accept": c.accept,
-		"set": c.set, "groups": c.groups,
-		"version": func([]string) error { fmt.Fprintf(c.out, "tigprint %s\n", version); return nil },
+		"reverse": c.reverse, "describe": c.describe, "link": c.link,
+		"set": c.set, "groups": c.groups, "version": c.version,
 	}
 	name := g.Arg(0)
 	cmd, ok := cmds[name]
@@ -156,7 +186,17 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 func (c *cli) flags(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet("tigprint "+name, flag.ContinueOnError)
 	fs.SetOutput(c.errs)
+	if name != "mcp" {
+		fs.BoolVar(&c.asJSON, "json", false, "answer in JSON")
+	}
 	return fs
+}
+
+func (c *cli) version(args []string) error {
+	if err := c.flags("version").Parse(args); err != nil {
+		return err
+	}
+	return c.emit(map[string]string{"version": version}, func() { fmt.Fprintf(c.out, "tigprint %s\n", version) })
 }
 
 // start is the folder tigprint was pointed at.
@@ -204,6 +244,8 @@ func (c *cli) init(args []string) error {
 	fs := c.flags("init")
 	root := fs.String("root", "README.md", "the main document")
 	outside := fs.String("outside", "", "comma-separated path prefixes that are not part of the chain")
+	force := fs.Bool("force", false, "the code there is one commit, and every line of the documents goes with it")
+	by := fs.String("by", tig.ByHuman, "who says so: human, ai, tool, or your own word")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -230,13 +272,31 @@ func (c *cli) init(args []string) error {
 	if err != nil {
 		return err
 	}
-	if existed {
-		fmt.Fprintf(c.out, "tig already in %s (config kept)\n", r.Dir)
-	} else {
-		fmt.Fprintf(c.out, "tig started in %s\n", r.Dir)
+	out := struct {
+		Dir      string               `json:"dir"`
+		Existed  bool                 `json:"existed"`
+		Root     string               `json:"root"`
+		Snapshot string               `json:"snapshot"`
+		Force    *tig.InitForceResult `json:"force,omitempty"`
+	}{Dir: r.Dir, Existed: existed, Root: cfg.Root, Snapshot: s.ID}
+	if *force {
+		res, err := r.InitForce(c.ctx, tig.InitForceInput{Config: cfg, By: *by, Actor: c.actor})
+		if err != nil {
+			return err
+		}
+		out.Force = &res
 	}
-	fmt.Fprintf(c.out, "main document %s, snapshot %s\n", cfg.Root, short(s.ID))
-	return nil
+	return c.emit(out, func() {
+		if existed {
+			fmt.Fprintf(c.out, "tig already in %s (config kept)\n", r.Dir)
+		} else {
+			fmt.Fprintf(c.out, "tig started in %s\n", r.Dir)
+		}
+		fmt.Fprintf(c.out, "main document %s, snapshot %s\n", cfg.Root, short(s.ID))
+		if out.Force != nil {
+			fmt.Fprintf(c.out, "baseline %s; %d lines marked in %d documents\n", short(out.Force.Baseline.ID), out.Force.Lines, len(out.Force.Docs))
+		}
+	})
 }
 
 func (c *cli) snap(args []string) error {
@@ -252,12 +312,13 @@ func (c *cli) snap(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !changed {
-		fmt.Fprintf(c.out, "nothing changed since snapshot %s\n", short(s.ID))
-		return nil
-	}
-	fmt.Fprintf(c.out, "snapshot %s\n", short(s.ID))
-	return nil
+	return c.emit(map[string]any{"snapshot": s, "changed": changed}, func() {
+		if !changed {
+			fmt.Fprintf(c.out, "nothing changed since snapshot %s\n", short(s.ID))
+			return
+		}
+		fmt.Fprintf(c.out, "snapshot %s\n", short(s.ID))
+	})
 }
 
 func (c *cli) log(args []string) error {
@@ -273,10 +334,11 @@ func (c *cli) log(args []string) error {
 	if err != nil {
 		return err
 	}
-	for _, s := range snaps {
-		fmt.Fprintf(c.out, "%s  %s  %-20s %s\n", short(s.ID), s.At.Local().Format("2006-01-02 15:04"), s.Reason, s.Actor)
-	}
-	return nil
+	return c.emit(snaps, func() {
+		for _, s := range snaps {
+			fmt.Fprintf(c.out, "%s  %s  %-20s %s\n", short(s.ID), s.At.Local().Format("2006-01-02 15:04"), s.Reason, s.Actor)
+		}
+	})
 }
 
 // snapshot is a snapshot by a unique prefix of its hash, or HEAD.
@@ -311,6 +373,11 @@ func (c *cli) snapshot(ref string) (tig.Snapshot, error) {
 }
 
 func (c *cli) diff(args []string) error {
+	fs := c.flags("diff")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	args = fs.Args()
 	if err := c.open(); err != nil {
 		return err
 	}
@@ -334,8 +401,7 @@ func (c *cli) diff(args []string) error {
 	} else if changes, err = c.r.Changed(c.ctx, from.Tree); err != nil {
 		return err
 	}
-	printChanges(c.out, "", changes)
-	return nil
+	return c.emit(changes, func() { printChanges(c.out, "", changes) })
 }
 
 func at(args []string, i int) string {
@@ -389,8 +455,9 @@ func (c *cli) restore(args []string) error {
 	if err := c.r.Restore(c.ctx, s.Tree, paths); err != nil {
 		return err
 	}
-	fmt.Fprintf(c.out, "restored %d files from %s (the project before it is snapshot %s)\n", len(paths), short(s.ID), short(before.ID))
-	return nil
+	return c.emit(map[string]any{"restored": paths, "from": s.ID, "before": before.ID}, func() {
+		fmt.Fprintf(c.out, "restored %d files from %s (the project before it is snapshot %s)\n", len(paths), short(s.ID), short(before.ID))
+	})
 }
 
 func heading(b *tig.Block) string {
@@ -401,6 +468,11 @@ func heading(b *tig.Block) string {
 }
 
 func (c *cli) blocks(args []string) error {
+	fs := c.flags("blocks")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	args = fs.Args()
 	if len(args) != 1 {
 		return errors.New("usage: tigprint blocks <file.md>")
 	}
@@ -417,13 +489,15 @@ func (c *cli) blocks(args []string) error {
 			}
 		}
 	}
-	for _, b := range tig.ParseBlocks(rel, data) {
-		fmt.Fprintf(c.out, "%s  %s%s  (lines %d-%d)\n", short(b.Hash), strings.Repeat("  ", max(b.Level-1, 0)), heading(&b), b.Start, b.End)
-		for _, cmd := range b.Accept {
-			fmt.Fprintf(c.out, "              %s$ %s\n", strings.Repeat("  ", b.Level), cmd)
+	blocks := tig.ParseBlocks(rel, data)
+	return c.emit(blocks, func() {
+		for _, b := range blocks {
+			fmt.Fprintf(c.out, "%s  %s%s  (lines %d-%d)\n", short(b.Hash), strings.Repeat("  ", max(b.Level-1, 0)), heading(&b), b.Start, b.End)
+			for _, cmd := range b.Accept {
+				fmt.Fprintf(c.out, "              %s$ %s\n", strings.Repeat("  ", b.Level), cmd)
+			}
 		}
-	}
-	return nil
+	})
 }
 
 func (c *cli) analyze() (*tig.Analysis, error) {
@@ -434,21 +508,34 @@ func (c *cli) analyze() (*tig.Analysis, error) {
 }
 
 func (c *cli) chain(args []string) error {
-	if len(args) != 0 {
+	fs := c.flags("chain")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
 		return errors.New("usage: tigprint chain")
 	}
 	a, err := c.analyze()
 	if err != nil {
 		return err
 	}
+	blocks := make([]*tig.Block, 0, len(a.Chain.Order))
 	for _, h := range a.Chain.Order {
-		b := a.Chain.Blocks[h]
-		fmt.Fprintf(c.out, "%s  %s%s\n", short(h), strings.Repeat("  ", max(b.Level-1, 0)), heading(b))
+		blocks = append(blocks, a.Chain.Blocks[h])
 	}
-	return nil
+	return c.emit(blocks, func() {
+		for _, b := range blocks {
+			fmt.Fprintf(c.out, "%s  %s%s\n", short(b.Hash), strings.Repeat("  ", max(b.Level-1, 0)), heading(b))
+		}
+	})
 }
 
 func (c *cli) show(args []string) error {
+	fs := c.flags("show")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	args = fs.Args()
 	if len(args) != 1 {
 		return errors.New("usage: tigprint show <block|reference>")
 	}
@@ -463,6 +550,16 @@ func (c *cli) show(args []string) error {
 			return err
 		}
 		return c.showRef(args[0])
+	}
+	if c.asJSON {
+		var stale []tig.Finding
+		for _, f := range a.Report.Stale {
+			if f.Block == b.Hash {
+				stale = append(stale, f)
+			}
+		}
+		return printJSON(c.out, map[string]any{"kind": "block", "block": b, "handsOn": ch.Details[b.Hash], "links": ch.Refs[b.Hash], "built": a.Built[b.Hash],
+			"was": a.Before(b.Hash), "stale": stale, "works": a.Trail(b.Hash)})
 	}
 	fmt.Fprintf(c.out, "%s\n%s:%d-%d  %s\n", b.Hash, b.Path, b.Start, b.End, strings.Join(b.Heading, " > "))
 	if b.Text != "" {
@@ -500,6 +597,11 @@ func (c *cli) show(args []string) error {
 }
 
 func (c *cli) search(args []string) error {
+	fs := c.flags("search")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	args = fs.Args()
 	if len(args) == 0 {
 		return errors.New("usage: tigprint search <words>")
 	}
@@ -511,18 +613,19 @@ func (c *cli) search(args []string) error {
 	if err != nil {
 		return err
 	}
-	for _, h := range a.Search(strings.Join(args, " "), files) {
-		fmt.Fprintf(c.out, "%-5s %s  %s  %s\n", h.Kind, short(h.Ref), h.Path, h.Title)
-		if h.Snippet != "" {
-			fmt.Fprintf(c.out, "      %s\n", h.Snippet)
+	hits := a.Search(strings.Join(args, " "), files)
+	return c.emit(hits, func() {
+		for _, h := range hits {
+			fmt.Fprintf(c.out, "%-5s %s  %s  %s\n", h.Kind, short(h.Ref), h.Path, h.Title)
+			if h.Snippet != "" {
+				fmt.Fprintf(c.out, "      %s\n", h.Snippet)
+			}
 		}
-	}
-	return nil
+	})
 }
 
 func (c *cli) check(args []string) error {
 	fs := c.flags("check")
-	asJSON := fs.Bool("json", false, "print the report as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -531,14 +634,8 @@ func (c *cli) check(args []string) error {
 		return err
 	}
 	rep := a.Report
-	if *asJSON {
-		enc := json.NewEncoder(c.out)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(rep); err != nil {
-			return err
-		}
-	} else {
-		c.printReport(rep)
+	if err := c.emit(rep, func() { c.printReport(rep) }); err != nil {
+		return err
 	}
 	if !rep.Closed {
 		return errNotClosed
@@ -620,6 +717,24 @@ func (c *cli) trail(args []string) error {
 		}
 		works = a.Trail(b.Hash)
 	}
+	if c.asJSON {
+		type entry struct {
+			tig.Work
+			StepList []tig.Step `json:"stepList,omitempty"`
+		}
+		out := make([]entry, 0, len(works))
+		for i, w := range works {
+			if i == *n {
+				break
+			}
+			e := entry{Work: w}
+			if *steps {
+				e.StepList = a.Steps(w)
+			}
+			out = append(out, e)
+		}
+		return printJSON(c.out, out)
+	}
 	for i, w := range works {
 		if i == *n {
 			fmt.Fprintf(c.out, "  ... %d more (-n)\n", len(works)-i)
@@ -671,9 +786,16 @@ func (c *cli) work(args []string) error {
 	case "finish":
 		return c.workFinish(args[1:])
 	case "status":
+		fs := c.flags("work status")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
 		w, err := c.r.Current()
 		if err != nil {
 			return err
+		}
+		if c.asJSON {
+			return printJSON(c.out, map[string]any{"inProgress": w != nil, "work": w})
 		}
 		if w == nil {
 			fmt.Fprintln(c.out, "no work in progress")
@@ -700,13 +822,31 @@ func (c *cli) commits(args []string) error {
 	}
 	all := commits.All()
 	slices.Reverse(all)
-	for i, w := range all {
-		if i == *n {
-			break
-		}
-		fmt.Fprintf(c.out, "%-6s %s  %-10s %s\n", commits.Short(w.ID), w.At.Local().Format("2006-01-02 15:04"), w.Result, w.Intent)
+	if len(all) > *n {
+		all = all[:*n]
 	}
-	return nil
+	l, err := c.r.Ledger(c.ctx)
+	if err != nil {
+		return err
+	}
+	type line struct {
+		Short      string `json:"short"`
+		ID         string `json:"id"`
+		At         string `json:"at"`
+		Result     string `json:"result"`
+		Acceptance string `json:"acceptance"`
+		Intent     string `json:"intent"`
+		Actor      string `json:"actor,omitempty"`
+	}
+	lines := make([]line, 0, len(all))
+	for _, w := range all {
+		lines = append(lines, line{commits.Short(w.ID), w.ID, w.At.UTC().Format("2006-01-02T15:04:05Z"), w.Result, l.AcceptanceOf(w), w.Intent, w.Actor})
+	}
+	return c.emit(lines, func() {
+		for i, w := range all {
+			fmt.Fprintf(c.out, "%-6s %s  %-10s %-9s %s\n", lines[i].Short, w.At.Local().Format("2006-01-02 15:04"), w.Result, lines[i].Acceptance, w.Intent)
+		}
+	})
 }
 
 // many collects a flag given several times.
@@ -717,8 +857,8 @@ func (m *many) Set(v string) error { *m = append(*m, v); return nil }
 
 func (c *cli) set(args []string) error {
 	fs := c.flags("set")
-	asJSON := fs.Bool("json", false, "print JSON")
 	var in tig.SetInput
+	fs.Var((*many)(&in.Intents), "i", "an intent, by reference")
 	fs.Var((*many)(&in.Sentences), "s", "a sentence, in its words")
 	fs.Var((*many)(&in.Commits), "id", "a commit")
 	fs.Var((*many)(&in.Files), "f", "a file")
@@ -730,7 +870,7 @@ func (c *cli) set(args []string) error {
 		return err
 	}
 	set := a.Relations(c.ctx).Set(in)
-	if *asJSON {
+	if c.asJSON {
 		return printJSON(c.out, set)
 	}
 	for _, s := range set.Sentences {
@@ -753,7 +893,6 @@ func (c *cli) set(args []string) error {
 
 func (c *cli) groups(args []string) error {
 	fs := c.flags("groups")
-	asJSON := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -762,7 +901,7 @@ func (c *cli) groups(args []string) error {
 		return err
 	}
 	groups := a.Relations(c.ctx).Groups()
-	if *asJSON {
+	if c.asJSON {
 		return printJSON(c.out, groups)
 	}
 	for _, g := range groups {
@@ -778,6 +917,11 @@ func printJSON(w io.Writer, v any) error {
 }
 
 func (c *cli) commit(args []string) error {
+	fs := c.flags("commit")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	args = fs.Args()
 	if len(args) != 1 {
 		return errors.New("usage: tigprint commit <id>")
 	}
@@ -788,6 +932,9 @@ func (c *cli) commit(args []string) error {
 	v, err := a.Commit(args[0])
 	if err != nil {
 		return err
+	}
+	if c.asJSON {
+		return printJSON(c.out, v)
 	}
 	fmt.Fprintf(c.out, "%s  %s\n%s  %s by %s\n", v.Short, v.ID, v.At.Local().Format("2006-01-02 15:04"), v.Result, v.Actor)
 	fmt.Fprintf(c.out, "\n  %s\n\n", v.Intent)
@@ -808,21 +955,28 @@ func (c *cli) mark(args []string) error {
 	ids := fs.String("id", "", "the commits, separated by commas")
 	doc := fs.String("doc", "", "the document (default: the main document)")
 	under := fs.String("under", "", "the section a new sentence goes under")
-	inferred := fs.Bool("inferred", false, "it is a guess: for the inferred document unless the main document says it")
-	confirm := fs.Bool("confirm", false, "a person says this is what was meant")
+	inferred := fs.Bool("inferred", false, "it is a guess: for the inferred document unless the document says it")
+	propose := fs.Bool("propose", false, "the commits only may follow it: nobody has agreed")
+	confirm := fs.Bool("confirm", false, "this is what was meant")
+	why := fs.String("why", "", "why the commits follow it")
+	var by, via string
+	who(fs, &by, &via)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return errors.New("usage: tigprint mark [-id a1b2,c3d4] [-doc f.md] [-under title] [-inferred] [-confirm] <sentence>")
+		return errors.New("usage: tigprint mark [-id a1b2,c3d4] [-doc f.md] [-under title] [-inferred] [-propose] [-confirm] [-why why] <sentence>")
 	}
 	var refs []string
 	if *ids != "" {
 		refs = strings.Split(*ids, ",")
 	}
-	in := tig.MarkInput{Path: *doc, Under: *under, IDs: refs, Inferred: *inferred, Actor: c.actor, Via: tig.ViaDirect}
+	in := tig.MarkInput{Path: *doc, Under: *under, IDs: refs, Inferred: *inferred, By: by, Via: via, Actor: c.actor, Reason: *why}
 	if *confirm {
-		in.State, in.By = tig.IntentConfirmed, tig.ByHuman
+		in.State = tig.IntentConfirmed
+	}
+	if *propose || *inferred {
+		in.Link = tig.LinkProposed
 	}
 	if err := c.open(); err != nil {
 		return err
@@ -832,8 +986,112 @@ func (c *cli) mark(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(c.out, "%s:%d  %s  %s\n", m.Path, m.Line, strings.Join(m.IDs, " "), m.Text)
+	return c.emit(m, func() { fmt.Fprintf(c.out, "%s:%d  %s  %s\n", m.Path, m.Line, strings.Join(m.IDs, " "), m.Text) })
+}
+
+// reverse finds which lines seem to be about which files, and proposes them when told to.
+func (c *cli) reverse(args []string) error {
+	fs := c.flags("reverse")
+	least := fs.Int("min", 0, "leave out candidates scoring under this, out of 100")
+	write := fs.Bool("write", false, "propose them: someone still has to agree")
+	by := fs.String("by", tig.ByTool, "who says so")
+	via := fs.String("via", tig.ViaReverse, "how it came about")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	res, err := c.r.Reverse(c.ctx)
+	if err != nil {
+		return err
+	}
+	kept := res.Candidates[:0:0]
+	for _, cand := range res.Candidates {
+		if cand.Score >= *least {
+			kept = append(kept, cand)
+		}
+	}
+	res.Candidates = kept
+	var written []tig.Described
+	if *write {
+		if written, err = c.r.ProposeReverse(c.ctx, res.Candidates, *by, *via, c.actor); err != nil {
+			return err
+		}
+	}
+	if c.asJSON {
+		return printJSON(c.out, map[string]any{"candidates": res.Candidates, "openLines": res.OpenLines, "openFiles": res.OpenFiles, "written": written})
+	}
+	for _, cand := range res.Candidates {
+		fmt.Fprintf(c.out, "%3d  %s:%d:%d-%d  %s\n", cand.Score, cand.Path, cand.Line, cand.From, cand.To, cand.Text)
+		fmt.Fprintf(c.out, "     files  %s\n     why    %s\n", strings.Join(cand.Files, ", "), tig.ClueReason(cand.Clues))
+	}
+	fmt.Fprintf(c.out, "%d candidates; %d lines and %d files with nothing found\n", len(res.Candidates), len(res.OpenLines), len(res.OpenFiles))
+	if *write {
+		fmt.Fprintf(c.out, "%d proposed; decide on each with tigprint link\n", len(written))
+	}
 	return nil
+}
+
+// describe says a line is about files already there.
+func (c *cli) describe(args []string) error {
+	fs := c.flags("describe")
+	var in tig.DescribeInput
+	fs.Var((*many)(&in.Files), "f", "a file")
+	fs.StringVar(&in.Path, "doc", "", "the document (default: the main document)")
+	fs.StringVar(&in.Under, "under", "", "the section a new sentence goes under")
+	fs.IntVar(&in.Line, "line", 0, "the 1-based line, to tell apart lines that say the same")
+	fs.StringVar(&in.Intent, "m", "", "the commit's one line (default: the sentence)")
+	fs.StringVar(&in.Reason, "why", "", "why the line goes with the files")
+	propose := fs.Bool("propose", false, "only propose it: nobody has agreed")
+	who(fs, &in.By, &in.Via)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 || len(in.Files) == 0 {
+		return errors.New("usage: tigprint describe -f file... [-doc f.md] [-under title] [-line n] [-m intent] [-why why] [-propose] <sentence>")
+	}
+	if *propose {
+		in.Link = tig.LinkProposed
+	}
+	in.Sentence, in.Actor = strings.Join(fs.Args(), " "), c.actor
+	if err := c.open(); err != nil {
+		return err
+	}
+	d, err := c.r.Describe(c.ctx, in)
+	if err != nil {
+		return err
+	}
+	return c.emit(d, func() {
+		fmt.Fprintf(c.out, "%s:%d  %s  %s\n", d.Mark.Path, d.Mark.Line, short(d.Work.ID), d.Mark.Text)
+	})
+}
+
+// link records whether this code goes with this intent.
+func (c *cli) link(args []string) error {
+	fs := c.flags("link")
+	reject := fs.Bool("reject", false, "it does not")
+	var in tig.LinkDecision
+	fs.StringVar(&in.Reason, "m", "", "why")
+	who(fs, &in.By, &in.Via)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return errors.New("usage: tigprint link [-reject] [-m why] <intent> <id>")
+	}
+	if err := c.open(); err != nil {
+		return err
+	}
+	in.Intent, in.Work, in.Actor, in.State = fs.Arg(0), fs.Arg(1), c.actor, tig.LinkConfirmed
+	if *reject {
+		in.State = tig.LinkRejected
+	}
+	e, err := c.r.DecideLink(c.ctx, in)
+	if err != nil {
+		return err
+	}
+	return c.emit(e, func() { fmt.Fprintf(c.out, "%s %s %s\n", fs.Arg(0), short(e.Work), e.State) })
 }
 
 func (c *cli) fold(args []string) error {
@@ -856,21 +1114,33 @@ func (c *cli) fold(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(c.out, "%s folds %s\n", commits.Short(w.ID), strings.Join(fs.Args(), " "))
-	return nil
+	return c.emit(map[string]any{"short": commits.Short(w.ID), "id": w.ID, "folds": fs.Args()}, func() {
+		fmt.Fprintf(c.out, "%s folds %s\n", commits.Short(w.ID), strings.Join(fs.Args(), " "))
+	})
 }
 
 func (c *cli) unmark(args []string) error {
+	fs := c.flags("unmark")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	args = fs.Args()
 	if len(args) == 0 {
 		return errors.New("usage: tigprint unmark <id>...")
 	}
 	if err := c.open(); err != nil {
 		return err
 	}
-	return c.r.Unmark(c.ctx, args)
+	if err := c.r.Unmark(c.ctx, args); err != nil {
+		return err
+	}
+	return c.emit(map[string]any{"unmarked": args}, func() {})
 }
 
-func (c *cli) sync(_ []string) error {
+func (c *cli) sync(args []string) error {
+	if err := c.flags("sync").Parse(args); err != nil {
+		return err
+	}
 	if err := c.open(); err != nil {
 		return err
 	}
@@ -878,17 +1148,19 @@ func (c *cli) sync(_ []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(c.out, "%d documents rewritten, %d intents touched, %d moved, %d old marks converted\n", len(res.Docs), len(res.Touched), len(res.Moved), res.Migrated)
-	for _, i := range res.Touched {
-		fmt.Fprintf(c.out, "touched %s: confirm it again\n", i)
-	}
-	return nil
+	return c.emit(res, func() {
+		fmt.Fprintf(c.out, "%d documents rewritten, %d intents touched, %d moved, %d old marks converted\n", len(res.Docs), len(res.Touched), len(res.Moved), res.Migrated)
+		for _, i := range res.Touched {
+			fmt.Fprintf(c.out, "touched %s: confirm it again\n", i)
+		}
+	})
 }
 
 func (c *cli) decide(name string, args []string, do func(tig.DecideInput) (*tig.Intent, error), set func(fs *flag.FlagSet, in *tig.DecideInput)) error {
 	fs := c.flags(name)
 	var in tig.DecideInput
 	fs.StringVar(&in.Reason, "m", "", "why")
+	who(fs, &in.By, &in.Via)
 	if set != nil {
 		set(fs, &in)
 	}
@@ -901,13 +1173,12 @@ func (c *cli) decide(name string, args []string, do func(tig.DecideInput) (*tig.
 	if err := c.open(); err != nil {
 		return err
 	}
-	in.Intent, in.By, in.Via, in.Actor = fs.Arg(0), tig.ByHuman, tig.ViaDirect, c.actor
+	in.Intent, in.Actor = fs.Arg(0), c.actor
 	i, err := do(in)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(c.out, "%s#%d  %s  %s\n", i.Short, i.Revision, i.State, i.Text)
-	return nil
+	return c.emit(i, func() { fmt.Fprintf(c.out, "%s#%d  %s  %s\n", i.Short, i.Revision, i.State, i.Text) })
 }
 
 func (c *cli) confirm(args []string) error {
@@ -922,14 +1193,14 @@ func (c *cli) reject(args []string) error {
 }
 
 func (c *cli) retire(args []string) error {
-	var by string
+	var with string
 	return c.decide("retire", args, func(in tig.DecideInput) (*tig.Intent, error) {
-		if by != "" {
-			in.From = []string{by}
+		if with != "" {
+			in.From = []string{with}
 		}
 		return c.r.RetireIntent(c.ctx, in)
 	}, func(fs *flag.FlagSet, _ *tig.DecideInput) {
-		fs.StringVar(&by, "by", "", "the intent that took its place")
+		fs.StringVar(&with, "for", "", "the intent that took its place")
 	})
 }
 
@@ -937,6 +1208,8 @@ func (c *cli) accept(args []string) error {
 	fs := c.flags("accept")
 	reject := fs.Bool("reject", false, "record it as rejected")
 	reason := fs.String("m", "", "why")
+	var by, via string
+	who(fs, &by, &via)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -950,12 +1223,11 @@ func (c *cli) accept(args []string) error {
 	if *reject {
 		state = tig.WorkRejected
 	}
-	a, err := c.r.Accept(c.ctx, tig.AcceptInput{Work: fs.Arg(0), State: state, By: tig.ByHuman, Via: tig.ViaDirect, Actor: c.actor, Reason: *reason})
+	a, err := c.r.Accept(c.ctx, tig.AcceptInput{Work: fs.Arg(0), State: state, By: by, Via: via, Actor: c.actor, Reason: *reason})
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(c.out, "%s %s\n", short(a.Work), a.State)
-	return nil
+	return c.emit(a, func() { fmt.Fprintf(c.out, "%s %s\n", short(a.Work), a.State) })
 }
 
 // showRef prints what a reference means.
@@ -963,6 +1235,9 @@ func (c *cli) showRef(ref string) error {
 	v, err := c.r.Show(c.ctx, ref)
 	if err != nil {
 		return err
+	}
+	if c.asJSON {
+		return printJSON(c.out, v)
 	}
 	switch {
 	case v.Intent != nil:
@@ -980,7 +1255,7 @@ func (c *cli) showRef(ref string) error {
 			fmt.Fprintf(c.out, "  place  %s:%d  %s\n", p.Path, p.Line, p.Ref)
 		}
 		for _, w := range i.Works {
-			fmt.Fprintf(c.out, "  work   %s %s #%d (%s)\n", w.Short, w.Kind, w.Revision, w.Acceptance)
+			fmt.Fprintf(c.out, "  work   %s %s #%d (%s, link %s)\n", w.Short, w.Kind, w.Revision, w.Acceptance, w.State)
 		}
 		if i.Previous != nil {
 			fmt.Fprintf(c.out, "  before %s %q", i.Previous.Ref, i.Previous.Text)
@@ -1032,8 +1307,7 @@ func (c *cli) baseline(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(c.out, "%s  %s\n", commits.Short(w.ID), w.Intent)
-	return nil
+	return c.emit(map[string]any{"short": commits.Short(w.ID), "work": w}, func() { fmt.Fprintf(c.out, "%s  %s\n", commits.Short(w.ID), w.Intent) })
 }
 
 // basis turns block references into hashes.
@@ -1073,8 +1347,7 @@ func (c *cli) workStart(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(c.out, "work started (snapshot %s)\n", short(w.Before))
-	return nil
+	return c.emit(w, func() { fmt.Fprintf(c.out, "work started (snapshot %s)\n", short(w.Before)) })
 }
 
 func (c *cli) workStep(args []string) error {
@@ -1123,6 +1396,9 @@ func (c *cli) workStep(args []string) error {
 	if err != nil {
 		return err
 	}
+	if c.asJSON {
+		return printJSON(c.out, s)
+	}
 	fmt.Fprintf(c.out, "step %s (%s)\n", short(s.ID), s.Kind)
 	if s.Before != "" && s.After != "" {
 		changes, err := tig.DiffTrees(c.ctx, c.r.Objects, s.Before, s.After)
@@ -1156,8 +1432,7 @@ func (c *cli) workFinish(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(c.out, "work %s: %s, %d steps\n", short(w.ID), w.Result, len(w.Steps))
-	return nil
+	return c.emit(w, func() { fmt.Fprintf(c.out, "work %s: %s, %d steps\n", short(w.ID), w.Result, len(w.Steps)) })
 }
 
 func (c *cli) mcp(args []string) error {
@@ -1196,6 +1471,9 @@ func (c *cli) push(args []string) error {
 	}
 	if err != nil {
 		return err
+	}
+	if c.asJSON {
+		return printJSON(c.out, res)
 	}
 	if res.UpToDate {
 		fmt.Fprintf(c.out, "up to date: %s has these documents and this chain (publication %s)\n", project, short(res.Publication.ID))

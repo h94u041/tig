@@ -44,17 +44,21 @@ const (
 	IntentSpans      = "spans" // its text moved and did not change
 )
 
-// Who decided, and how it came to them.
+// Who decided. Any other value may be written and is kept.
 const (
 	ByHuman = "human"
 	ByAI    = "ai"
+	ByTool  = "tool" // a program that follows fixed rules
+)
 
-	ViaDirect   = "direct"
-	ViaSmooth   = "smooth"
-	ViaAnalysis = "analysis"
-	ViaBuilder  = "builder"
-	ViaPlanner  = "planner"
-	ViaMigrated = "migrated"
+// How it came to them. Via is free text: a tool on top of tig says its own ways
+// of working here, and tig only keeps them. These are the ones tig itself writes.
+const (
+	ViaDirect   = "direct"   // said straight out
+	ViaAgent    = "agent"    // an agent, through tig's own MCP server
+	ViaMigrated = "migrated" // an old mark, converted
+	ViaInit     = "init"     // init -force
+	ViaReverse  = "reverse"  // tig's reverse marking
 )
 
 // Kinds of link between a work and an intent.
@@ -64,7 +68,16 @@ const (
 	LinkRefactors  = "refactors"
 	LinkTests      = "tests"
 	LinkReverts    = "reverts"
-	LinkUnlinked   = "unlinked" // an earlier link is withdrawn
+	LinkDescribes  = "describes" // the code was already there: the line says what it does
+	LinkUnlinked   = "unlinked"  // an earlier link is withdrawn
+)
+
+// States of a link: whether this code goes with this intent, which is a
+// different question from whether the intent is right.
+const (
+	LinkProposed  = "proposed"  // someone says so, nobody has agreed
+	LinkConfirmed = "confirmed" // a record with no state is one of these
+	LinkRejected  = "rejected"  // it does not; it is remembered so nobody proposes it again
 )
 
 // States of a work's acceptance.
@@ -156,7 +169,11 @@ type LinkEvent struct {
 	Intent   string    `json:"intent"`
 	Revision int       `json:"revision"`
 	Kind     string    `json:"kind"`
+	State    string    `json:"state"`
+	By       string    `json:"by,omitempty"`
+	Via      string    `json:"via,omitempty"`
 	Actor    string    `json:"actor,omitempty"`
+	Reason   string    `json:"reason,omitempty"`
 	At       time.Time `json:"at"`
 }
 
@@ -322,7 +339,11 @@ func (r *Repo) Ledger(ctx context.Context) (*Ledger, error) {
 				return nil, err
 			}
 			rev, _ := strconv.Atoi(rec.get("revision"))
-			l.links = append(l.links, LinkEvent{ID: id, Work: rec.get("work"), Intent: rec.get("intent"), Revision: rev, Kind: rec.get("kind"), Actor: rec.get("actor"), At: rec.time("at")})
+			state := rec.get("state")
+			if state == "" {
+				state = LinkConfirmed
+			}
+			l.links = append(l.links, LinkEvent{ID: id, Work: rec.get("work"), Intent: rec.get("intent"), Revision: rev, Kind: rec.get("kind"), State: state, By: rec.get("by"), Via: rec.get("via"), Actor: rec.get("actor"), Reason: rec.get("reason"), At: rec.time("at")})
 		case acceptanceHeader:
 			rec, err := parseRecord(raw, header)
 			if err != nil {
@@ -509,9 +530,9 @@ func (l *Ledger) shortLine(hash string) string {
 	return hash[:n]
 }
 
-// LinksOf is the links standing on an intent: per work, the last one said,
-// unless that withdrew it. Oldest first.
-func (l *Ledger) LinksOf(intent string) []LinkEvent {
+// lastLinks is, per work, the last thing said about its link to an intent, in
+// the order the works first came up.
+func (l *Ledger) lastLinks(intent string) []LinkEvent {
 	latest := map[string]LinkEvent{}
 	var works []string
 	for _, e := range l.links {
@@ -523,13 +544,52 @@ func (l *Ledger) LinksOf(intent string) []LinkEvent {
 		}
 		latest[e.Work] = e
 	}
-	var out []LinkEvent
+	out := make([]LinkEvent, 0, len(works))
 	for _, w := range works {
-		if latest[w].Kind != LinkUnlinked {
-			out = append(out, latest[w])
+		out = append(out, latest[w])
+	}
+	return out
+}
+
+// LinksOf is the links standing on an intent: per work, the last one said,
+// unless that withdrew or rejected it. Oldest first.
+func (l *Ledger) LinksOf(intent string) []LinkEvent {
+	var out []LinkEvent
+	for _, e := range l.lastLinks(intent) {
+		if e.Kind != LinkUnlinked && e.State != LinkRejected {
+			out = append(out, e)
 		}
 	}
 	return out
+}
+
+// RejectedLinks is the links someone said do not hold, and nobody has said
+// otherwise since.
+func (l *Ledger) RejectedLinks(intent string) []LinkEvent {
+	var out []LinkEvent
+	for _, e := range l.lastLinks(intent) {
+		if e.Kind != LinkUnlinked && e.State == LinkRejected {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// LinkState says where a link stands. A work someone accepted carries what it
+// said about the intents it follows, so a proposed link on it counts as confirmed.
+func (l *Ledger) LinkState(e LinkEvent) string {
+	if e.State == LinkProposed {
+		if a, ok := l.accepts[e.Work]; ok && a.State == WorkAccepted {
+			return LinkConfirmed
+		}
+	}
+	return e.State
+}
+
+// Decision is the decision on a work: who made it and why. None: nobody has.
+func (l *Ledger) Decision(work string) (Acceptance, bool) {
+	a, ok := l.accepts[work]
+	return a, ok
 }
 
 // AcceptanceOf says where a work stands. A work with no decision is a candidate,
@@ -540,7 +600,7 @@ func (l *Ledger) AcceptanceOf(w Work) string {
 		return a.State
 	}
 	switch {
-	case l.start.IsZero(), w.At.Before(l.start), w.Result == ResultBaseline, w.Result == ResultFolded:
+	case l.start.IsZero(), w.At.Before(l.start), w.Result == ResultBaseline, w.Result == ResultFolded, w.Result == ResultDescribed:
 		return WorkAccepted
 	}
 	return WorkCandidate
@@ -656,12 +716,19 @@ func (r *Repo) addLink(l *Ledger, e LinkEvent) error {
 	if e.At.IsZero() {
 		e.At = time.Now().UTC()
 	}
+	if e.State == "" {
+		e.State = LinkConfirmed
+	}
 	rec := newRecord(linkEventHeader)
 	rec.set("work", e.Work)
 	rec.set("intent", e.Intent)
 	rec.set("revision", strconv.Itoa(e.Revision))
 	rec.set("kind", e.Kind)
+	rec.set("state", e.State)
+	rec.set("by", e.By)
+	rec.set("via", e.Via)
 	rec.set("actor", e.Actor)
+	rec.set("reason", e.Reason)
 	rec.setTime("at", e.At)
 	id, err := r.putLedger(rec.bytes())
 	if err != nil {
@@ -670,6 +737,69 @@ func (r *Repo) addLink(l *Ledger, e LinkEvent) error {
 	e.ID = id
 	l.links = append(l.links, e)
 	return nil
+}
+
+// LinkDecision is a decision on whether a work's code goes with an intent.
+type LinkDecision struct {
+	Intent string // any reference to the intent
+	Work   string // short ID, hash or unique prefix
+	State  string // LinkConfirmed or LinkRejected
+	By     string
+	Via    string
+	Actor  string
+	Reason string
+}
+
+// DecideLink records whether a work's code goes with an intent. It is a decision
+// about the correspondence and leaves the intent's own state alone; confirming
+// binds the work to the intent as it reads now. A link nobody has said anything
+// about can be decided on too.
+func (r *Repo) DecideLink(ctx context.Context, in LinkDecision) (LinkEvent, error) {
+	if in.State != LinkConfirmed && in.State != LinkRejected {
+		return LinkEvent{}, fmt.Errorf("tig: a link is confirmed or rejected, not %q", in.State)
+	}
+	if r.Dir == "" {
+		return LinkEvent{}, errors.New("tig: deciding needs a .tig folder")
+	}
+	unlock, err := lockRepo(ctx, r.Dir)
+	if err != nil {
+		return LinkEvent{}, err
+	}
+	defer unlock()
+	commits, err := r.Commits(ctx)
+	if err != nil {
+		return LinkEvent{}, err
+	}
+	w, err := commits.Resolve(in.Work)
+	if err != nil {
+		return LinkEvent{}, err
+	}
+	l, err := r.Ledger(ctx)
+	if err != nil {
+		return LinkEvent{}, err
+	}
+	p, err := ParseRef(in.Intent)
+	if err != nil {
+		return LinkEvent{}, err
+	}
+	if p.Kind != RefIntent {
+		return LinkEvent{}, fmt.Errorf("tig: %q is not an intent", in.Intent)
+	}
+	i, err := l.Intent("i" + p.Code)
+	if err != nil {
+		return LinkEvent{}, err
+	}
+	kind := LinkImplements
+	for _, e := range l.lastLinks(i.ID) {
+		if e.Work == w.ID && e.Kind != LinkUnlinked {
+			kind = e.Kind
+		}
+	}
+	e := LinkEvent{Work: w.ID, Intent: i.ID, Revision: i.Revision, Kind: kind, State: in.State, By: in.By, Via: in.Via, Actor: in.Actor, Reason: in.Reason}
+	if err := r.addLink(l, e); err != nil {
+		return LinkEvent{}, err
+	}
+	return l.links[len(l.links)-1], nil
 }
 
 // AcceptInput is a decision on a work.

@@ -31,7 +31,7 @@ A record is a header line naming its kind and version, then one `key value` line
 
 | Header | Fields |
 |---|---|
-| `tig-config 1` | `root` (the main document), `inferred` (the inferred document), `outside` (repeated) |
+| `tig-config 1` | `root` (the main document), `inferred` (the inferred document), `outside` (repeated), `user.name` and `user.by` (who acts here) |
 | `tig-snapshot 1` | `tree`, `parent` (repeated), `at`, `reason`, `actor`, `lineage` |
 | `tig-work 1` | `parent` (the work before), `basis` (repeated blocks), `intent`, `before` and `after` (snapshots), `step` (repeated, in order), `child` (repeated: the commits it folds), `result`, `actor`, `approver` (repeated), `started`, `at` |
 | `tig-step 1` | `kind`, `basis` (repeated blocks), `before` and `after` (trees), `command`, `exit`, `output` and `detail` (objects), `note`, `runner`, `actor`, `at` |
@@ -39,6 +39,8 @@ A record is a header line naming its kind and version, then one `key value` line
 | `tig-link 1` | `parent` (the link before), `from`, `to-block` or `to-file`, `to-hash` (the file when linked), `kind`, `note`, `actor`, `at` |
 
 Readers ignore keys they do not know. A later feature adds fields starting with `x-`, and readers keep them; a new version of a kind is only for a change older readers would misread.
+
+The global config is the same `tig-config 1` record, with only `user.name` and `user.by`, in `~/.tigconfig` or the file `$TIG_CONFIG_GLOBAL` names. It lives outside any project. A value in `.tig/config` comes before the global one.
 
 ## The ledger
 
@@ -48,10 +50,11 @@ Ledger records are named by their content like everything else, kept in `ledger/
 |---|---|
 | `tig-intent-event 1` | `intent` (the first event's hash; none on the first), `parent` (the event before), `kind`, `revision`, `text`, `span` (`line n from to`, repeated), `from` (repeated: where it came from), `by`, `via`, `actor`, `reason`, `at` |
 | `tig-line-event 1` | `line` (the text's hash), `parent` (the line it was), `at` |
-| `tig-link-event 1` | `work`, `intent`, `revision`, `kind`, `actor`, `at` |
+| `tig-link-event 1` | `work`, `intent`, `revision`, `kind`, `state` (`proposed`, `confirmed` or `rejected`; none means `confirmed`), `by`, `via`, `actor`, `reason`, `at` |
 | `tig-acceptance 1` | `work`, `state` (`accepted` or `rejected`), `by`, `via`, `actor`, `reason`, `at` |
 | `tig-ledger-start 1` | `at`: commits older than this count as accepted |
 
+For a link, the last record per work and intent is what stands. `by` and `via` are free text: tig gives them no meaning, and a tool on top says its own ways of working there. A proposed link on a commit with an `accepted` decision counts as confirmed. A reader ignores any key it does not know.
 ## Trees
 
 ```text

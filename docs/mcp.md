@@ -1,6 +1,6 @@
 # MCP server
 
-`tigprint mcp` serves a project's tig to agents over MCP, on stdin and stdout. Code: [mcpserver](../mcpserver/).
+`tigwx mcp` serves a project's tig to agents over MCP, on stdin and stdout. Code: [mcpserver](../mcpserver/).
 
 ## Tools
 
@@ -16,7 +16,9 @@
 | `start_work`, `record_step`, `finish_work` | Leave a footprint: start a work for some blocks, record each step, finish it. |
 | `read_commit` | One commit by its short ID: its intent, files, the sentences naming it, the commits it folds. |
 | `relation_set` | What a piece of work needs: from sentences, commits or files, the sentences, commits and files one step away. |
-| `mark_sentence` | Say which commits follow a sentence. A sentence the main document already says is bound there; any other is a guess, written to the inferred document as proposed by an AI. An agent cannot confirm an intent. |
+| `mark_sentence` | Say which commits follow a sentence. A sentence the document already says stays there; any other is a guess, written to the inferred document as proposed by an AI. Either way the link is only proposed. An agent cannot confirm an intent or a link. |
+| `reverse_marks` | Which lines seem to be about which files, by what the lines point at, and what nothing was found for. It follows fixed rules and writes nothing. |
+| `describe_sentence` | Say that a line is about files already there, and why. It is recorded as a proposal and binds nothing until someone agrees. |
 | `resolve` | What any reference means: an intent, a line, a commit or an event. |
 | `sync_lines` | Bring the ledger up to edited lines: new marks, and the intents on them follow. |
 | `fold_commits` | Fold commits under a new parent; lines then show the parent, and nothing disappears. |

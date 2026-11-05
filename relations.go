@@ -44,17 +44,33 @@ type Sentence struct {
 
 // SentenceIntent is an intent on a line.
 type SentenceIntent struct {
-	Ref      string   `json:"ref"`   // the whole reference: intent, revision, line and range
-	Short    string   `json:"short"` // the intent's short ID
-	Text     string   `json:"text"`
-	State    string   `json:"state"`
-	Revision int      `json:"revision"`
-	Review   bool     `json:"review,omitempty"`
-	By       string   `json:"by,omitempty"`
-	Via      string   `json:"via,omitempty"`
-	From     int      `json:"from"`
-	To       int      `json:"to"`
-	Commits  []string `json:"commits,omitempty"`
+	Ref      string `json:"ref"`   // the whole reference: intent, revision, line and range
+	Short    string `json:"short"` // the intent's short ID
+	Text     string `json:"text"`
+	State    string `json:"state"`
+	Revision int    `json:"revision"`
+	Review   bool   `json:"review,omitempty"`
+	By       string `json:"by,omitempty"`
+	Via      string `json:"via,omitempty"`
+	From     int    `json:"from"`
+	To       int    `json:"to"`
+	// Commits are the commits that stand on it. A description nobody has agreed
+	// with is not one of them: it is only in Links.
+	Commits []string `json:"commits,omitempty"`
+	// Links are all that is said about code going with it, decided or not.
+	Links []SentenceLink `json:"links,omitempty"`
+}
+
+// SentenceLink is one work said to go with an intent.
+type SentenceLink struct {
+	Commit     string   `json:"commit"` // short ID
+	Kind       string   `json:"kind"`
+	State      string   `json:"state"` // LinkProposed or LinkConfirmed
+	Acceptance string   `json:"acceptance"`
+	By         string   `json:"by,omitempty"`
+	Via        string   `json:"via,omitempty"`
+	Reason     string   `json:"reason,omitempty"`
+	Files      []string `json:"files,omitempty"`
 }
 
 var tableLine = regexp.MustCompile(`^\s*\|`)
@@ -187,6 +203,9 @@ func (a *Analysis) Relations(ctx context.Context) *Relations {
 // baseline (it stands for everything, so it says nothing), not undone, and not
 // a record of undoing.
 func (r *Relations) counts(c CommitLink) bool {
+	if c.Result == ResultDescribed && len(c.Sentences) == 0 {
+		return false // a reading of the code that nobody has agreed with
+	}
 	return !c.Undone && !c.Baseline() && c.Result != ResultRolledBack && c.Result != ResultAbandoned && c.Acceptance != WorkRejected
 }
 
