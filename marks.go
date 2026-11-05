@@ -68,7 +68,8 @@ type MarkInput struct {
 	Sentence string
 	// Under is the title of the section a new line goes under; a section is
 	// added if the document has none by that title, and with no title the line
-	// goes at the end.
+	// goes at the end. It can be a path, "Members > Accounts", to pick between
+	// sections of one name.
 	Under string
 	// IDs are the commits to link, by short ID, hash or unique start. There may
 	// be none: an intent nothing carries out yet.
@@ -197,10 +198,9 @@ func insertLine(path string, content []byte, text, under string) []byte {
 	eol := eolOf(content)
 	lines := strings.Split(string(content), "\n")
 	if under != "" {
-		for _, b := range ParseBlocks(path, content) {
-			if b.Level == 0 || b.Title != under {
-				continue
-			}
+		var section *Block
+		section, under = sectionFor(ParseBlocks(path, content), under)
+		if b := section; b != nil {
 			at := min(b.OwnEnd, len(lines))
 			for at > b.Start && strings.TrimSpace(lines[at-1]) == "" {
 				at--
@@ -222,6 +222,42 @@ func insertLine(path string, content []byte, text, under string) []byte {
 		out += "## " + under + eol + eol
 	}
 	return []byte(out + text + eol)
+}
+
+// sectionFor finds the section a title names, and says what to call a new one when
+// there is none. A title may come as a path, "Members > Accounts": the way a heading
+// reads when it is listed, and what a caller copies from such a list. Then the last
+// part is the section, and the parts before it pick between sections of that name.
+func sectionFor(blocks []Block, under string) (*Block, string) {
+	for i := range blocks {
+		if blocks[i].Level > 0 && blocks[i].Title == under {
+			return &blocks[i], under
+		}
+	}
+	var parts []string
+	for _, p := range strings.Split(under, ">") {
+		if p = strings.TrimSpace(p); p != "" {
+			parts = append(parts, p)
+		}
+	}
+	if len(parts) < 2 {
+		return nil, under
+	}
+	last := parts[len(parts)-1]
+	var named *Block
+	for i := range blocks {
+		b := &blocks[i]
+		if b.Level == 0 || b.Title != last {
+			continue
+		}
+		if len(b.Heading) >= len(parts) && slices.Equal(b.Heading[len(b.Heading)-len(parts):], parts) {
+			return b, last
+		}
+		if named == nil {
+			named = b
+		}
+	}
+	return named, last
 }
 
 // trackedDocs are the documents whose lines the ledger follows: the chain, the

@@ -155,6 +155,53 @@ func TestShortIDs(t *testing.T) {
 	}
 }
 
+// A title can come the way a list shows it. It finds the section it means, and a
+// new section is called by its own name.
+func TestMarkUnderAPath(t *testing.T) {
+	ctx := context.Background()
+	r := tig.Open(t.TempDir())
+	writeDoc := func(text string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(r.Root, "README.md"), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func() string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(r.Root, "README.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	writeDoc("# Members\n\n## Accounts\n\nOne line.\n\n## Billing\n\n### Accounts\n\nAnother line.\n")
+	if err := r.Init(tig.Config{Root: "README.md"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ under, sentence, after string }{
+		{"Members > Accounts", "First new.", "One line."},
+		{"Billing > Accounts", "Second new.", "Another line."},
+		{"Accounts", "Third new.", "First new."},
+		{"Nowhere > Billing", "Fourth new.", "## Billing"},
+	} {
+		if _, err := r.Mark(ctx, tig.MarkInput{Sentence: c.sentence, Under: c.under}); err != nil {
+			t.Fatal(err)
+		}
+		text := read()
+		at, after := strings.Index(text, c.sentence), strings.Index(text, c.after)
+		if at < 0 || after < 0 || at < after {
+			t.Fatalf("%q under %q:\n%s", c.sentence, c.under, text)
+		}
+	}
+	if _, err := r.Mark(ctx, tig.MarkInput{Sentence: "Fifth new.", Under: "Members > Refunds"}); err != nil {
+		t.Fatal(err)
+	}
+	text := read()
+	if !strings.Contains(text, "## Refunds\n") || strings.Contains(text, "Members > Refunds") {
+		t.Fatalf("a new section keeps only its own name:\n%s", text)
+	}
+}
+
 func TestMarkFoldAndCommitView(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
