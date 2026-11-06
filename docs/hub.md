@@ -31,7 +31,7 @@ The tree and the objects are those of [the format](format.md): content-addressed
 
 ## Pushing
 
-`tigwx push <url>` takes the hub's address of the project, `http://host/owner/name`, or `$TIG_HUB`; the token is `-token` or `$TIG_TOKEN`. Like `git push`:
+`tigwx push <url>` takes the hub's address of the project, `https://host/owner/name`, or `$TIG_HUB`; the token is `$TIG_TOKEN`, or `-token`, which shows in your shell history and in the list of running programs. A token goes over plain `http` only to this machine: to anywhere else tigwx refuses, unless you say `-insecure`, because anyone on the way could read it and then push as you. A push follows no redirect. Like `git push`:
 
 1. it asks the hub for the project's head;
 2. it builds the publication on top of that head, and stops when the documents and the chain are what the head already has;
@@ -48,7 +48,13 @@ The hub checks a push before it keeps any of it, and refuses it whole when:
 - the publication's parent is not the project's head;
 - the token is not the owner's.
 
-A project is made by its owner's first push. Tokens are given to the hub in a file, one `owner token` per line.
+A project is made by its owner's first push. Tokens are given to the hub in a file, one `owner token` per line, of at least 16 characters; on Linux and macOS the hub warns when others on the machine can read that file.
+
+Asking which objects the hub lacks takes the owner's token too, and is limited to 4 MB: reading that request costs the hub work.
+
+## Running a hub
+
+`tighub` speaks plain `http` and does not limit how fast anyone may ask. On any network, run it behind a reverse proxy that does `https` and limits rates (Caddy, nginx, a cloud load balancer), and keep `-addr` on an address only the proxy can reach. It has timeouts for slow clients (two minutes to read or write a request), and what goes wrong on the server goes to its log, not to the client.
 
 ## Reading
 
@@ -62,10 +68,10 @@ Anyone can read what a hub keeps:
 | `/owner/name/log` | the publications, newest first |
 | `/api/v1/projects/owner/name` | the head and the chain, as JSON |
 
-Documents are rendered from Markdown without their raw HTML. A link to another document of the chain stays a link; a link to a file the hub does not have becomes its name.
+Documents are rendered from Markdown without their raw HTML. A link to another document of the chain stays a link; a link to a file the hub does not have becomes its name. Since the documents are what other people wrote, every answer carries a `Content-Security-Policy` that allows no scripts, nothing from elsewhere and no framing, along with `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
 
 ## Acceptance
 
-The tests in [hub_test.go](../hub/hub_test.go): a push of a project to a hub in the test, what the hub refuses, and its pages.
+The tests in [hub_test.go](../hub/hub_test.go) and [guard_test.go](../hub/guard_test.go): a push of a project to a hub in the test, what the hub refuses, its pages, and what keeps tokens and other people's documents in their place.
 
 - `go test ./hub/`

@@ -30,16 +30,27 @@ An intent is what a line, or a part of one, means. It has an identity that outli
 |---|---|
 | `proposed` | someone said this is what it means |
 | `confirmed` | a person, or an AI authorised to, agreed |
-| `revised`, `touched` | its text changed: a new revision. `touched` means an edit of its line reached its range, so a confirmed intent wants another look |
+| `revised` | someone changed what it says, on purpose, and said why: a new revision. A person's revision needs no other look; anyone else's does |
+| `touched` | an edit of its line reached its range and nobody said why: a new revision, and a confirmed intent wants another look |
 | `spans` | its text moved and did not change: no new revision |
 | `split`, `composed`, `superseded` | made out of others, or replaced by another |
 | `deprecated`, `rejected` | it no longer stands, or never did |
 
-Each event records `by` (`human`, `ai`, `tool`, or a word of your own) and `via` (free text: what tig itself writes is `direct`, `agent`, `migrated`, `init`, `reverse`, and a tool on top says its own), so an AI's decision can always be told from a person's. Code: [ledger.go](../ledger.go).
+Each event records `by` (`human`, `ai`, `tool`, or a word of your own) and `via` (free text: what tig itself writes is `direct`, `agent`, `migrated`, `init`, `reverse`, and a tool on top says its own), so an AI's decision can be told from a person's, and may record `source`: what it was decided from, a conversation, a ticket, a document. `by` is what the writer claimed: tig keeps it and proves nothing, and anyone who can write to `.tig` can write any of it. On the command line, with no `-by` and no `user.by`, a terminal records `human` and anything else records `unknown`, so a script does not pass for a person. Code: [ledger.go](../ledger.go).
 
 Commits link to an intent at a revision, as `implements`, `fixes`, `refactors`, `tests`, `reverts`, `describes` or `unlinked`. Whether the intent is right and whether this code goes with it are two questions, so a link has a state of its own: `proposed`, `confirmed` or `rejected`. A person's word starts confirmed and anyone else's proposed. A rejected link is remembered, and nobody proposing it again brings it back.
 
 A commit is a **candidate** until someone records it accepted or rejected. Accepting one carries the links it proposed. Commits older than the ledger, the baseline, folded commits and descriptions count as accepted; a rejected commit's links count for nothing, and undoing its code is a separate act.
+
+## What intents have to do with each other
+
+A shared commit or file says the code depends on it, not that the intents do. So two intents can be related, with what someone said about them: `depends_on` (the first does not hold without the second), `part_of`, `parallel` (they stand apart, whatever code they share), or a word of your own. A relation has a state, as a link has, and the last thing said stands: `proposed`, `confirmed` or `rejected`, which is remembered. An agent can only propose. Code: [relate.go](../relate.go).
+
+tig gives a relation little meaning, and only once it is confirmed. A set that asks for an intent also brings what it `depends_on`, one step, saying why. A `parallel` relation takes nothing out of a set: the other intent stays, noted, because tig does not decide what goes in a piece of work. Whoever uses the set does.
+
+## When machines disagree
+
+The ledger merges by taking both sides' records, so two people can decide differently without either seeing the other. When that happens the ledger still gives one answer, the same for everyone, but it came from the order of two clocks. The intent is **disputed**: `check` opens the chain over it (`intent-disputed`), `status` counts it, and `tigwx log <intent>` shows who decided what. Any decision taken after seeing both settles it. An edit of the line settles a difference over its words, not a difference over whether it stands. If a third event is written on the branch that sorts last, before the machines merge, it reads as settling it: that takes three decisions on one intent within one merge, and it fails towards the last word in time.
 
 ## Connecting what is already there
 
@@ -58,7 +69,7 @@ A commit is a **candidate** until someone records it accepted or rejected. Accep
 - a range after it shifts;
 - a range that overlaps it, or covers the whole line, is touched: a new revision, and a confirmed intent wants another look.
 
-Two changes in one line count as one region, so an edit may touch more intents than strictly needed, never fewer. Until sync runs the line shows as unsynced. `Analyze` and `check` only read; `sync` writes. Old marks (`**sentence *a1b2***`) are converted by sync: each becomes an intent proposed `via migrated`, not confirmed, because where it came from is not known. Code: [marks.go](../marks.go).
+Two changes in one line count as one region, so an edit may touch more intents than strictly needed, never fewer. Until sync runs the line shows as unsynced. `tigwx sync -m why` says the change was meant: what it reached is recorded as `revised`, with the reason, and `tigwx log <intent>` shows everything that happened to an intent. `Analyze` and `check` only read; `sync` writes. Old marks (`**sentence *a1b2***`) are converted by sync: each becomes an intent proposed `via migrated`, not confirmed, because where it came from is not known. Code: [marks.go](../marks.go).
 
 ## The inferred document
 
@@ -101,7 +112,7 @@ The chain starts at the main document (`root` in `.tig/config`, `README.md` unle
 `tigwx check`, and the `check` tool over MCP, report:
 
 - **broken**: links to files that do not exist, orphan documents, and marks that name nothing the ledger knows (`broken-mark`);
-- **stale**: a file built for a block whose design has changed since while the file did not follow; a built file changed outside the footprint, or gone; a proposed link whose file has changed; a line whose text moved on with no commit following it (`intent-changed`); a file a line's commits built changed outside any commit, or gone (`code-away`); a line still in the old format (`unsynced`); a confirmed intent nobody has looked at since it changed (`review`); a confirmed intent whose line is in no document (`intent-missing`). Code: [links.go](../links.go);
+- **stale**: a file built for a block whose design has changed since while the file did not follow; a built file changed outside the footprint, or gone; a proposed link whose file has changed; a line whose text moved on with no commit following it (`intent-changed`); a file a line's commits built changed outside any commit, or gone (`code-away`); a line still in the old format (`unsynced`); a confirmed intent nobody has looked at since it changed (`review`); a confirmed intent whose line is in no document (`intent-missing`); decisions taken apart that nobody has settled (`intent-disputed`). Code: [links.go](../links.go);
 - **no design reaches**: files no block links to and no work built.
 
 The report also lists the commits no line names (**unbound**): work the design has not caught up with. They do not open the chain.
@@ -114,6 +125,6 @@ Blocks, works, steps and files containing every word of a query. It is keyword s
 
 ## Acceptance
 
-The tests in [markdown_test.go](../markdown_test.go), [chain_test.go](../chain_test.go), [marks_test.go](../marks_test.go) and [ledger_test.go](../ledger_test.go):
+The tests in [markdown_test.go](../markdown_test.go), [chain_test.go](../chain_test.go), [marks_test.go](../marks_test.go), [ledger_test.go](../ledger_test.go), [forks_internal_test.go](../forks_internal_test.go) and [relate_test.go](../relate_test.go):
 
-- `go test -run "Blocks|Chain|Stale|Broken|Mark|Line|Ledger|Intent|Ref" .`
+- `go test -run "Blocks|Chain|Stale|Broken|Mark|Line|Ledger|Intent|Ref|Relate|Parallel|Depends|Disputed|Revised|Forks|Deleted" .`

@@ -28,6 +28,7 @@ const (
 	linkEventHeader   = "tig-link-event 1"
 	acceptanceHeader  = "tig-acceptance 1"
 	ledgerStartHeader = "tig-ledger-start 1"
+	relationHeader    = "tig-intent-relation 1"
 )
 
 // Kinds of intent event.
@@ -49,6 +50,9 @@ const (
 	ByHuman = "human"
 	ByAI    = "ai"
 	ByTool  = "tool" // a program that follows fixed rules
+	// ByUnknown: nobody said who, and there was no person at a terminal to assume.
+	// By is a claim either way: tig records what it is told and proves nothing.
+	ByUnknown = "unknown"
 )
 
 // How it came to them. Via is free text: a tool on top of tig says its own ways
@@ -117,19 +121,22 @@ func parseSpan(v string) (Span, error) {
 // IntentEvent is one thing that happened to an intent. The first of an intent
 // has no Intent: its own hash is the intent's ID.
 type IntentEvent struct {
-	ID       string    `json:"id"`
-	Intent   string    `json:"intent,omitempty"`
-	Parent   string    `json:"parent,omitempty"`
-	Kind     string    `json:"kind"`
-	Revision int       `json:"revision"` // the intent's revision after this event
-	Text     string    `json:"text,omitempty"`
-	Spans    []Span    `json:"spans,omitempty"`
-	From     []string  `json:"from,omitempty"` // the intents it came from, or what took its place
-	By       string    `json:"by,omitempty"`
-	Via      string    `json:"via,omitempty"`
-	Actor    string    `json:"actor,omitempty"`
-	Reason   string    `json:"reason,omitempty"`
-	At       time.Time `json:"at"`
+	ID       string   `json:"id"`
+	Intent   string   `json:"intent,omitempty"`
+	Parent   string   `json:"parent,omitempty"`
+	Kind     string   `json:"kind"`
+	Revision int      `json:"revision"` // the intent's revision after this event
+	Text     string   `json:"text,omitempty"`
+	Spans    []Span   `json:"spans,omitempty"`
+	From     []string `json:"from,omitempty"` // the intents it came from, or what took its place
+	By       string   `json:"by,omitempty"`
+	Via      string   `json:"via,omitempty"`
+	Actor    string   `json:"actor,omitempty"`
+	Reason   string   `json:"reason,omitempty"`
+	// Source is what it was decided from: a conversation, a ticket, a document.
+	// Free text; tig keeps it and reads nothing into it.
+	Source string    `json:"source,omitempty"`
+	At     time.Time `json:"at"`
 }
 
 func (e IntentEvent) encode() []byte {
@@ -147,6 +154,7 @@ func (e IntentEvent) encode() []byte {
 	rec.set("via", e.Via)
 	rec.set("actor", e.Actor)
 	rec.set("reason", e.Reason)
+	rec.set("source", e.Source)
 	rec.setTime("at", e.At)
 	return rec.bytes()
 }
@@ -207,6 +215,18 @@ type Intent struct {
 	Actor string        `json:"actor,omitempty"`
 	From  []string      `json:"from,omitempty"`
 	Log   []IntentEvent `json:"log,omitempty"` // oldest first
+	// Forks are decisions taken apart and not yet settled: see IntentFork.
+	Forks []IntentFork `json:"forks,omitempty"`
+}
+
+// IntentFork is two or more different decisions on the same state of an intent,
+// taken by people who had not seen each other's: two machines, merged later. The
+// ledger still gives one answer, the same for everyone, but that answer came from
+// the order of two clocks and not from anybody choosing. So it is shown until
+// someone decides again.
+type IntentFork struct {
+	After  string        `json:"after"`  // the event they all followed
+	Events []IntentEvent `json:"events"` // the decisions; the last is the one standing
 }
 
 // Active reports whether the intent still stands.
@@ -265,6 +285,8 @@ type Ledger struct {
 	parents map[string]string // line → the line it came from
 	accepts map[string]Acceptance
 	start   time.Time // when the ledger began; zero when it has not
+	// relations are what was said about pairs of intents, oldest first: see relate.go.
+	relations []RelationEvent
 }
 
 func (r *Repo) ledgerDir() string {
@@ -350,6 +372,12 @@ func (r *Repo) Ledger(ctx context.Context) (*Ledger, error) {
 				return nil, err
 			}
 			accepts = append(accepts, Acceptance{ID: id, Work: rec.get("work"), State: rec.get("state"), By: rec.get("by"), Via: rec.get("via"), Actor: rec.get("actor"), Reason: rec.get("reason"), At: rec.time("at")})
+		case relationHeader:
+			e, err := parseRelationEvent(id, raw)
+			if err != nil {
+				return nil, err
+			}
+			l.relations = append(l.relations, e)
 		case ledgerStartHeader:
 			rec, err := parseRecord(raw, header)
 			if err != nil {
@@ -361,6 +389,7 @@ func (r *Repo) Ledger(ctx context.Context) (*Ledger, error) {
 		}
 	}
 	slices.SortFunc(l.links, func(a, b LinkEvent) int { return laterFirst(a.At, b.At, a.ID, b.ID) })
+	slices.SortFunc(l.relations, func(a, b RelationEvent) int { return laterFirst(a.At, b.At, a.ID, b.ID) })
 	slices.SortFunc(accepts, func(a, b Acceptance) int { return laterFirst(a.At, b.At, a.ID, b.ID) })
 	for _, a := range accepts {
 		l.accepts[a.Work] = a
@@ -383,7 +412,7 @@ func parseIntentEvent(id string, raw []byte) (IntentEvent, error) {
 	}
 	rev, _ := strconv.Atoi(rec.get("revision"))
 	e := IntentEvent{ID: id, Intent: rec.get("intent"), Parent: rec.get("parent"), Kind: rec.get("kind"), Revision: rev, Text: rec.get("text"),
-		From: rec.all("from"), By: rec.get("by"), Via: rec.get("via"), Actor: rec.get("actor"), Reason: rec.get("reason"), At: rec.time("at")}
+		From: rec.all("from"), By: rec.get("by"), Via: rec.get("via"), Actor: rec.get("actor"), Reason: rec.get("reason"), Source: rec.get("source"), At: rec.time("at")}
 	if err := hashesValid(id, nil, e.Intent, e.Parent); err != nil {
 		return IntentEvent{}, err
 	}
@@ -438,6 +467,7 @@ func (l *Ledger) fold() {
 		for _, e := range rest {
 			walk(e)
 		}
+		i.Forks = openForks(i.Log, children)
 		n := minIntentShort
 		for n < len(i.ID) && l.byShort["i"+i.ID[:n]] != nil {
 			n++
@@ -447,6 +477,61 @@ func (l *Ledger) fold() {
 		l.intents[i.ID] = i
 		l.order = append(l.order, i)
 	}
+}
+
+// decidesSomething: the event changes where the intent stands or what it says.
+// A move of its text does not, and neither does a first event.
+func decidesSomething(e IntentEvent) bool {
+	switch e.Kind {
+	case IntentConfirmed, IntentRejected, IntentSuperseded, IntentDeprecated:
+		return true
+	case IntentTouched, IntentRevised:
+		return e.Text != ""
+	}
+	return false
+}
+
+// openForks finds the decisions taken apart that nobody has settled. Whoever
+// decides after seeing both writes an event that follows the last of the log, so
+// it comes after all of them. An edit of the line settles a difference over its
+// words, not a difference over whether it stands: only a decision does that.
+//
+// The log cannot tell an event written with both in sight from one written on the
+// branch that happens to sort last and later in time, so a third event raced in
+// on that branch reads as settling it. That takes three decisions on one intent
+// within one merge; it is a limit, and it fails towards the last word in time.
+func openForks(log []IntentEvent, children map[string][]IntentEvent) []IntentFork {
+	pos := make(map[string]int, len(log))
+	for n, e := range log {
+		pos[e.ID] = n
+	}
+	var out []IntentFork
+	for _, parent := range log {
+		var decisions []IntentEvent
+		different := map[string]bool{}
+		wordsOnly := true
+		for _, k := range children[parent.ID] {
+			if decidesSomething(k) {
+				decisions = append(decisions, k)
+				different[k.Kind+"\x00"+k.Text] = true
+				wordsOnly = wordsOnly && (k.Kind == IntentTouched || k.Kind == IntentRevised)
+			}
+		}
+		if len(different) < 2 {
+			continue
+		}
+		settled := false
+		for _, later := range log[pos[decisions[len(decisions)-1].ID]+1:] {
+			if decidesSomething(later) && (later.Kind != IntentTouched || wordsOnly) {
+				settled = true
+				break
+			}
+		}
+		if !settled {
+			out = append(out, IntentFork{After: parent.ID, Events: decisions})
+		}
+	}
+	return out
 }
 
 // Intents is every intent, oldest first.

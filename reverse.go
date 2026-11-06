@@ -485,6 +485,7 @@ type DescribeInput struct {
 	Via    string
 	Actor  string
 	Reason string
+	Source string // what it was decided from
 }
 
 // Described is what Describe wrote.
@@ -545,7 +546,7 @@ func (r *Repo) Describe(ctx context.Context, in DescribeInput) (Described, error
 	if err != nil {
 		return Described{}, err
 	}
-	m, err := r.Mark(ctx, MarkInput{Path: in.Path, Sentence: sentence, Under: in.Under, Line: in.Line, IDs: []string{w.ID}, Inferred: true, LinkKind: LinkDescribes, Link: in.Link, By: in.By, Via: in.Via, Actor: in.Actor, Reason: in.Reason})
+	m, err := r.Mark(ctx, MarkInput{Path: in.Path, Sentence: sentence, Under: in.Under, Line: in.Line, IDs: []string{w.ID}, Inferred: true, LinkKind: LinkDescribes, Link: in.Link, By: in.By, Via: in.Via, Actor: in.Actor, Reason: in.Reason, Source: in.Source})
 	if err != nil {
 		return Described{Work: w}, err
 	}
@@ -628,7 +629,7 @@ func (r *Repo) InitForce(ctx context.Context, in InitForceInput) (InitForceResul
 		return out, err
 	}
 	defer unlock()
-	_, l, err := r.syncLocked(ctx, in.Actor)
+	_, l, err := r.syncLocked(ctx, SyncInput{Actor: in.Actor})
 	if err != nil {
 		return out, err
 	}

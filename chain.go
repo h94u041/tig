@@ -50,12 +50,13 @@ type Finding struct {
 
 // What a finding about a mark says went wrong.
 const (
-	FindBrokenMark    = "broken-mark"    // the sentence names a commit that does not exist
-	FindIntentChanged = "intent-changed" // the sentence was reworded and no commit followed
-	FindCodeAway      = "code-away"      // a file its commits built changed outside any commit
-	FindUnsynced      = "unsynced"       // the line still holds a mark in the old format
-	FindReview        = "review"         // the intent's text changed and nobody has confirmed it since
-	FindIntentMissing = "intent-missing" // a confirmed intent's line is no longer in any document
+	FindBrokenMark    = "broken-mark"     // the sentence names a commit that does not exist
+	FindIntentChanged = "intent-changed"  // the sentence was reworded and no commit followed
+	FindCodeAway      = "code-away"       // a file its commits built changed outside any commit
+	FindUnsynced      = "unsynced"        // the line still holds a mark in the old format
+	FindReview        = "review"          // the intent's text changed and nobody has confirmed it since
+	FindIntentMissing = "intent-missing"  // a confirmed intent's line is no longer in any document
+	FindDisputed      = "intent-disputed" // decisions on it were taken apart and nobody has settled them
 )
 
 // source is where the chain reads files: a tree, or the working files.
@@ -634,7 +635,7 @@ func (a *Analysis) footprint(ctx context.Context) {
 		}
 		b := c.Blocks[block]
 		switch {
-		case bt.basis != block && now == bt.hash && !exact[block]:
+		case bt.hash != "" && bt.basis != block && now == bt.hash && !exact[block]:
 			rep.Stale = append(rep.Stale, Finding{Block: block, Path: file, Title: b.Title,
 				Message: "the design changed after this file was built for it, and the file did not follow"})
 		case bt.basis == block && now != bt.hash && lastTouch[file] != now:
@@ -784,7 +785,7 @@ func (a *Analysis) footprintOfMarks(ctx context.Context, lastTouch map[string]st
 						ref.N = s.N
 					}
 					s.Intents = append(s.Intents, SentenceIntent{Ref: ref.String(), Short: i.Short, Text: i.Text, State: i.State, Revision: i.Revision,
-						Review: i.Review, By: i.By, Via: i.Via, From: sp.From, To: sp.To, Commits: shorts, Links: said})
+						Review: i.Review, By: i.By, Via: i.Via, From: sp.From, To: sp.To, Commits: shorts, Links: said, Relations: l.RelationsOf(i.ID), Disputed: len(i.Forks) > 0})
 				}
 				for _, short := range shorts {
 					s.IDs = appendNew(s.IDs, short)
@@ -832,10 +833,19 @@ func (a *Analysis) footprintOfMarks(ctx context.Context, lastTouch map[string]st
 		}
 	}
 	for _, i := range l.Intents() {
+		p, ok := where[i.ID]
+		if len(i.Forks) > 0 {
+			// Whichever way the merge came out, it was not a decision, and it may have
+			// left a rejected intent standing or a standing one rejected.
+			f := Finding{Code: FindDisputed, Message: "decisions were taken apart and nobody has settled them: " + i.Short + " " + i.Text}
+			if ok {
+				f.Block, f.Path, f.Title, f.Line = p.block.Hash, p.block.Path, p.block.Title, p.line
+			}
+			rep.Stale = append(rep.Stale, f)
+		}
 		if !i.Active() {
 			continue
 		}
-		p, ok := where[i.ID]
 		if !ok {
 			if i.State == IntentConfirmed {
 				rep.Stale = append(rep.Stale, Finding{Code: FindIntentMissing, Message: "the line of a confirmed intent is no longer in any document: " + i.Short + " " + i.Text})

@@ -13,6 +13,7 @@ const (
 	SyncReview     = "review"     // an edit reached it and nobody has confirmed it since
 	SyncSuperseded = "superseded" // it no longer stands
 	SyncMissing    = "missing"    // no document holds its line
+	SyncDisputed   = "disputed"   // decisions on it were taken apart and nobody has settled them
 )
 
 // RefView is the one answer to "what is this reference?", for people and for
@@ -43,6 +44,12 @@ type IntentView struct {
 	Previous *Previous `json:"previous,omitempty"`
 	From     []string  `json:"from,omitempty"`
 	Sync     string    `json:"sync"`
+	// Relations are what is said about it and other intents; Rejected are those
+	// someone said do not hold.
+	Relations []IntentRelation `json:"relations,omitempty"`
+	Rejected  []IntentRelation `json:"rejected,omitempty"`
+	// Forks are the decisions taken apart that nobody has settled.
+	Forks []IntentFork `json:"forks,omitempty"`
 }
 
 // Place is a range of a line in a document.
@@ -173,7 +180,10 @@ func (a *Analysis) showIntent(_ context.Context, p Ref) (*IntentView, error) {
 			v.Previous = &Previous{Ref: fmt.Sprintf("%s#%d", i.Short, rev-1), Text: prev.Text, Reason: e.Reason}
 		}
 	}
+	v.Relations, v.Rejected, v.Forks = l.RelationsOf(i.ID), l.RejectedRelationsOf(i.ID), i.Forks
 	switch {
+	case len(i.Forks) > 0:
+		v.Sync = SyncDisputed
 	case !i.Active():
 		v.Sync = SyncSuperseded
 	case len(v.Places) == 0:

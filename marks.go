@@ -26,6 +26,9 @@ type Mark struct {
 	Hash  string   `json:"hash"` // the line's hash
 	N     int      `json:"n"`    // which of the lines with this text
 	IDs   []string `json:"ids"`  // commits, by short ID; a fold stands for what it folds
+	// Intent is the intent marking just made or found, by short ID. A mark read from
+	// a document has none: a line can hold many, and they are on its sentence.
+	Intent string `json:"intent,omitempty"`
 }
 
 // legacyMark is the format before line marks, **sentence *a1b2***: read only to
@@ -91,6 +94,8 @@ type MarkInput struct {
 	Actor string
 	// Reason says why, on the links.
 	Reason string
+	// Source is what it was decided from, on the intent's events.
+	Source string
 	// Line, when above 0, is the 1-based line meant, and Sentence is what it says
 	// or part of it. It tells apart lines that say the same thing. If the line no
 	// longer says that, the sentence is looked for as usual.
@@ -358,7 +363,33 @@ func (r *Repo) Sync(ctx context.Context, actor string) (SyncResult, error) {
 		return SyncResult{}, err
 	}
 	defer unlock()
-	res, _, err := r.syncLocked(ctx, actor)
+	res, _, err := r.syncLocked(ctx, SyncInput{Actor: actor})
+	return res, err
+}
+
+// SyncInput says who a sync speaks for. An edit nobody explained is a touch: the
+// words moved under whatever intent was on them, and a confirmed intent wants
+// looking at again. With a reason it is a revision: someone changed what the
+// intent says, on purpose, and said why.
+type SyncInput struct {
+	Actor  string
+	By     string
+	Via    string
+	Reason string
+	Source string // what the change came from
+}
+
+// SyncWith is Sync with who did it and why.
+func (r *Repo) SyncWith(ctx context.Context, in SyncInput) (SyncResult, error) {
+	if r.Dir == "" {
+		return SyncResult{}, nil
+	}
+	unlock, err := lockRepo(ctx, r.Dir)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	defer unlock()
+	res, _, err := r.syncLocked(ctx, in)
 	return res, err
 }
 
@@ -368,7 +399,7 @@ type lineMove struct {
 	oldText, newText string
 }
 
-func (r *Repo) syncLocked(ctx context.Context, actor string, also ...string) (SyncResult, *Ledger, error) {
+func (r *Repo) syncLocked(ctx context.Context, in SyncInput, also ...string) (SyncResult, *Ledger, error) {
 	var res SyncResult
 	l, err := r.Ledger(ctx)
 	if err != nil {
@@ -398,7 +429,7 @@ func (r *Repo) syncLocked(ctx context.Context, actor string, also ...string) (Sy
 			}
 			line := lines[i]
 			if legacyMark.MatchString(maskCode(line)) {
-				n, next, err := r.migrateLine(ctx, l, used, line, actor)
+				n, next, err := r.migrateLine(ctx, l, used, line, in.Actor)
 				if err != nil {
 					return res, nil, err
 				}
@@ -455,7 +486,7 @@ func (r *Repo) syncLocked(ctx context.Context, actor string, also ...string) (Sy
 			res.Docs = append(res.Docs, doc)
 		}
 	}
-	if err := r.followMoves(ctx, l, moves, actor, &res); err != nil {
+	if err := r.followMoves(ctx, l, moves, in, &res); err != nil {
 		return res, nil, err
 	}
 	return res, l, nil
@@ -467,7 +498,7 @@ func mustMark(line string) LineMark {
 }
 
 // followMoves carries the intents on lines whose text changed.
-func (r *Repo) followMoves(ctx context.Context, l *Ledger, moves map[spanKey]lineMove, actor string, res *SyncResult) error {
+func (r *Repo) followMoves(ctx context.Context, l *Ledger, moves map[spanKey]lineMove, in SyncInput, res *SyncResult) error {
 	if len(moves) == 0 {
 		return nil
 	}
@@ -496,9 +527,13 @@ func (r *Repo) followMoves(ctx context.Context, l *Ledger, moves map[spanKey]lin
 		if !moved {
 			continue
 		}
-		e := IntentEvent{Intent: i.ID, Kind: IntentSpans, Spans: spans, Actor: actor}
+		e := IntentEvent{Intent: i.ID, Kind: IntentSpans, Spans: spans, Actor: in.Actor}
 		if touched {
 			e.Kind, e.Revision, e.Text = IntentTouched, i.Revision+1, r.textOf(ctx, spans)
+			e.By, e.Via, e.Source = in.By, in.Via, in.Source
+			if in.Reason != "" {
+				e.Kind, e.Reason = IntentRevised, in.Reason
+			}
 			res.Touched = append(res.Touched, i.Short)
 		} else {
 			res.Moved = append(res.Moved, i.Short)
@@ -632,7 +667,7 @@ func (r *Repo) Mark(ctx context.Context, in MarkInput) (Mark, error) {
 		return Mark{}, err
 	}
 	defer unlock()
-	_, l, err := r.syncLocked(ctx, in.Actor, in.Path)
+	_, l, err := r.syncLocked(ctx, SyncInput{Actor: in.Actor}, in.Path)
 	if err != nil {
 		return Mark{}, err
 	}
@@ -699,12 +734,12 @@ func (r *Repo) Mark(ctx context.Context, in MarkInput) (Mark, error) {
 		}
 	}
 	if i == nil {
-		if i, err = r.addEvent(l, IntentEvent{Kind: IntentProposed, Text: sliceRunes(text, from, to), Spans: []Span{span}, By: in.By, Via: in.Via, Actor: in.Actor}); err != nil {
+		if i, err = r.addEvent(l, IntentEvent{Kind: IntentProposed, Text: sliceRunes(text, from, to), Spans: []Span{span}, By: in.By, Via: in.Via, Actor: in.Actor, Source: in.Source}); err != nil {
 			return Mark{}, err
 		}
 	}
 	if in.State == IntentConfirmed && (i.State != IntentConfirmed || i.Review) {
-		if i, err = r.addEvent(l, IntentEvent{Intent: i.ID, Kind: IntentConfirmed, By: in.By, Via: in.Via, Actor: in.Actor}); err != nil {
+		if i, err = r.addEvent(l, IntentEvent{Intent: i.ID, Kind: IntentConfirmed, By: in.By, Via: in.Via, Actor: in.Actor, Source: in.Source}); err != nil {
 			return Mark{}, err
 		}
 	}
@@ -735,7 +770,7 @@ func (r *Repo) Mark(ctx context.Context, in MarkInput) (Mark, error) {
 			return Mark{}, err
 		}
 	}
-	out := Mark{Path: in.Path, Line: at + 1, Text: text, Hash: hash, N: n, IDs: l.lineCommits(commits, hash, n)}
+	out := Mark{Path: in.Path, Line: at + 1, Text: text, Hash: hash, N: n, IDs: l.lineCommits(commits, hash, n), Intent: i.Short}
 	for _, b := range ParseBlocks(in.Path, data) {
 		for _, s := range b.Sentences {
 			if s.Line == at+1 {
@@ -811,6 +846,7 @@ type DecideInput struct {
 	Via    string
 	Actor  string
 	Reason string
+	Source string // what it was decided from
 }
 
 // lineIn finds the line of a document with this hash and number.
@@ -834,7 +870,7 @@ func (r *Repo) ConfirmIntent(ctx context.Context, in DecideInput) (*Intent, erro
 		if err := r.moveOutOfInferred(ctx, l, i, cfg, in); err != nil {
 			return err
 		}
-		_, err := r.addEvent(l, IntentEvent{Intent: i.ID, Kind: IntentConfirmed, By: in.By, Via: in.Via, Actor: in.Actor, Reason: in.Reason})
+		_, err := r.addEvent(l, IntentEvent{Intent: i.ID, Kind: IntentConfirmed, By: in.By, Via: in.Via, Actor: in.Actor, Reason: in.Reason, Source: in.Source})
 		return err
 	})
 }
@@ -844,7 +880,7 @@ func (r *Repo) ConfirmIntent(ctx context.Context, in DecideInput) (*Intent, erro
 // stays, because that is the document's owner's to change.
 func (r *Repo) RejectIntent(ctx context.Context, in DecideInput) (*Intent, error) {
 	return r.decide(ctx, in, func(l *Ledger, i *Intent, cfg Config) error {
-		if _, err := r.addEvent(l, IntentEvent{Intent: i.ID, Kind: IntentRejected, By: in.By, Via: in.Via, Actor: in.Actor, Reason: in.Reason}); err != nil {
+		if _, err := r.addEvent(l, IntentEvent{Intent: i.ID, Kind: IntentRejected, By: in.By, Via: in.Via, Actor: in.Actor, Reason: in.Reason, Source: in.Source}); err != nil {
 			return err
 		}
 		full, data, err := r.readDoc(cfg.InferredDoc())
@@ -878,7 +914,7 @@ func (r *Repo) RetireIntent(ctx context.Context, in DecideInput) (*Intent, error
 		kind = IntentSuperseded
 	}
 	return r.decide(ctx, in, func(l *Ledger, i *Intent, _ Config) error {
-		_, err := r.addEvent(l, IntentEvent{Intent: i.ID, Kind: kind, From: in.From, By: in.By, Via: in.Via, Actor: in.Actor, Reason: in.Reason})
+		_, err := r.addEvent(l, IntentEvent{Intent: i.ID, Kind: kind, From: in.From, By: in.By, Via: in.Via, Actor: in.Actor, Reason: in.Reason, Source: in.Source})
 		return err
 	})
 }
@@ -896,7 +932,7 @@ func (r *Repo) decide(ctx context.Context, in DecideInput, do func(l *Ledger, i 
 		return nil, err
 	}
 	defer unlock()
-	_, l, err := r.syncLocked(ctx, in.Actor)
+	_, l, err := r.syncLocked(ctx, SyncInput{Actor: in.Actor})
 	if err != nil {
 		return nil, err
 	}

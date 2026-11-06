@@ -8,6 +8,8 @@ Every file is stored once, as an object named by the SHA-256 of its content. Obj
 
 Which files: in a Git repository, Git's own list (tracked, and untracked but not ignored); otherwise every file, without `.git`, `.tig` and the folders the caller skips. A local cache of file sizes and times keeps unchanged files from being hashed again. Code: [files.go](../files.go), [statcache.go](../statcache.go).
 
+**Secrets.** Whatever a snapshot lists is kept for good and goes into Git with `.tig`, so a key must not get there by being in the folder. A file that looks like a key or a credential is left out, by its name alone: `.env` and `.env.*` (not `.env.example`, `.sample`, `.template` or `.dist`), `.npmrc`, `.pypirc`, `.netrc`, `.pgpass`, `.git-credentials`, `.htpasswd`, `credentials`, `credentials.json`, `secrets.json`, `secrets.yaml`, `secrets.yml`, `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.ppk`, and anything under `.ssh`, `.aws` or `.gnupg`. `tigwx status` lists what was left out. A file Git tracks stays listed: it is already in Git's history, and tracking it is how to say you mean it. This goes by names and reads no content, so it is a guard against the usual accident and not a scan: a key in `config.yaml` goes in. What is already in `.tig/objects` stays there, as in Git history; a key that got in should be treated as leaked and replaced. Code: [secrets.go](../secrets.go).
+
 A file's hash is of its bytes, line endings included. A project whose footprint should hold on every platform keeps its line endings fixed in Git, as this repository does with [.gitattributes](../.gitattributes).
 
 ## Snapshots
@@ -48,13 +50,15 @@ A project that joins tig with code already in it can have one **baseline** commi
 
 Sentences, commits and files are many-to-many, and whoever works on the project needs only a part of that. A **set** starts from sentences, commits or files and follows the relations one step: from a sentence to its commits and their files, from a commit to its sentences and files, from a file to the commits that changed it and their sentences. It stops there, so one file everybody touches does not bring in the whole project. The baseline's files are not listed: they would be everything.
 
-A set can also start from intents, and each thing in it says why it is there: `seed`, `commit:<short>` or `file:<path>`. Rejected commits are in no set.
+A set can also start from intents, and each thing in it says why it is there: `seed`, `commit:<short>`, `file:<path>` or `relation:<intent>`. Rejected commits are in no set.
+
+Asked for at a fixed revision (`i7f3a#2`), a set says what that revision said and whether the intent has moved on; a revision it never had is missing. A set always holds each sentence as it is now, so this is where the older words are. Every set also has a **digest**, the hash of what it holds: the same intents at the same revisions on the same lines, the same commits and the same files give the same digest, however someone got there. It says two people were given the same set, not that the code in those files is the same, and it is worked out, never stored.
 
 **Groups** split the picture: sentences sharing a commit are one group, and so are the commits of one fold. Groups sharing at least two files, and at least half of the smaller one's, become one, not counting files many groups touch. The baseline joins nothing. Sentences on the baseline alone, and sentences with no commit yet, stay together by section. A group's key stays while it grows: its oldest commit. An undone commit (one named in another's `x-undoes`) is in no set and no group. Code: [relations.go](../relations.go).
 
 ## Acceptance
 
-The tests in [tig_test.go](../tig_test.go), [work_test.go](../work_test.go), [marks_test.go](../marks_test.go) and [relations_test.go](../relations_test.go):
+The tests in [tig_test.go](../tig_test.go), [work_test.go](../work_test.go), [marks_test.go](../marks_test.go), [relations_test.go](../relations_test.go) and [secrets_test.go](../secrets_test.go):
 
-- `go test -run "Relations|Set|Groups" .`
+- `go test -run "Relations|Set|Groups|Secret" .`
 - `go test -run "Snapshot|Objects|Restore|Trees|Records|Executable|Work|ShortIDs|Fold|Baseline|Sessions" .`

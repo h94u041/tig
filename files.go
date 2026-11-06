@@ -21,8 +21,21 @@ var defaultSkip = []string{".git", ".tig", "node_modules"}
 // break in it). A skip entry with a slash in it is a path from the root, and it
 // holds in a Git repository too: a tool can keep its own records in the project
 // without them counting as the project's files. An entry without one is a folder
-// name, for a project without Git.
+// name, for a project without Git. A file that looks like a key or a credential
+// is left out unless Git already tracks it: see LooksSecret and LeftOut.
 func Files(ctx context.Context, root string, skip []string) ([]string, error) {
+	files, _, err := listFiles(ctx, root, skip)
+	return files, err
+}
+
+// LeftOut is what Files leaves out because it looks like a secret, so whoever
+// wants one of them kept can say so to Git by tracking it.
+func LeftOut(ctx context.Context, root string, skip []string) ([]string, error) {
+	_, out, err := listFiles(ctx, root, skip)
+	return out, err
+}
+
+func listFiles(ctx context.Context, root string, skip []string) (files, secret []string, err error) {
 	var under []string
 	for _, d := range skip {
 		if strings.Contains(d, "/") {
@@ -38,28 +51,39 @@ func Files(ctx context.Context, root string, skip []string) ([]string, error) {
 		return listable(rel)
 	}
 	if out, err := git(ctx, root, "rev-parse", "--is-inside-work-tree"); err == nil && strings.TrimSpace(string(out)) == "true" {
-		if out, err := git(ctx, root, "ls-files", "-co", "--exclude-standard", "-z"); err == nil {
-			var files []string
+		tracked, err1 := git(ctx, root, "ls-files", "-c", "-z")
+		others, err2 := git(ctx, root, "ls-files", "-o", "--exclude-standard", "-z")
+		if err1 == nil && err2 == nil {
 			seen := map[string]bool{}
-			for _, rel := range strings.Split(string(out), "\x00") {
-				if rel == "" || seen[rel] || !listed(rel) {
-					continue
-				}
-				seen[rel] = true
-				if fi, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel))); err == nil && fi.Mode().IsRegular() {
+			add := func(list []byte, guard bool) {
+				for _, rel := range strings.Split(string(list), "\x00") {
+					if rel == "" || seen[rel] || !listed(rel) {
+						continue
+					}
+					seen[rel] = true
+					fi, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel)))
+					if err != nil || !fi.Mode().IsRegular() {
+						continue
+					}
+					if guard && LooksSecret(rel) {
+						secret = append(secret, rel)
+						continue
+					}
 					files = append(files, rel)
 				}
 			}
+			add(tracked, false)
+			add(others, true)
 			sort.Strings(files)
-			return files, nil
+			sort.Strings(secret)
+			return files, secret, nil
 		}
 	}
 	skipped := map[string]bool{}
 	for _, d := range append(append([]string{}, defaultSkip...), skip...) {
 		skipped[d] = true
 	}
-	var files []string
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if p == root {
 				return err
@@ -75,12 +99,17 @@ func Files(ctx context.Context, root string, skip []string) ([]string, error) {
 			return nil
 		}
 		if d.Type().IsRegular() && listed(rel) {
-			files = append(files, rel)
+			if LooksSecret(rel) {
+				secret = append(secret, rel)
+			} else {
+				files = append(files, rel)
+			}
 		}
 		return nil
 	})
 	sort.Strings(files)
-	return files, err
+	sort.Strings(secret)
+	return files, secret, err
 }
 
 func listable(rel string) bool {

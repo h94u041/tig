@@ -2,6 +2,7 @@ package tig
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
@@ -40,6 +41,10 @@ type Sentence struct {
 	Intents []SentenceIntent `json:"intents,omitempty"`
 	// Why is, in a set, how it got there: see Set.
 	Why string `json:"why,omitempty"`
+	// Parallel is, in a set, the intents asked for that someone said this one stands
+	// apart from. It is still there, because it shares code with them; whoever uses
+	// the set decides what to do with it.
+	Parallel []string `json:"parallel,omitempty"`
 }
 
 // SentenceIntent is an intent on a line.
@@ -59,6 +64,10 @@ type SentenceIntent struct {
 	Commits []string `json:"commits,omitempty"`
 	// Links are all that is said about code going with it, decided or not.
 	Links []SentenceLink `json:"links,omitempty"`
+	// Relations are what is said about it and other intents, decided or not.
+	Relations []IntentRelation `json:"relations,omitempty"`
+	// Disputed: decisions on it were taken apart and nobody has settled them.
+	Disputed bool `json:"disputed,omitempty"`
 }
 
 // SentenceLink is one work said to go with an intent.
@@ -133,11 +142,12 @@ type Relations struct {
 	byFile map[string][]int
 	leaves map[string][]string // id → its leaves
 	short  *Commits
+	ledger *Ledger // nil in a picture put together by hand
 }
 
 // Relations reads the picture from an analysis.
 func (a *Analysis) Relations(ctx context.Context) *Relations {
-	r := &Relations{byID: map[string]int{}, byFile: map[string][]int{}, leaves: map[string][]string{}, short: a.commits}
+	r := &Relations{byID: map[string]int{}, byFile: map[string][]int{}, leaves: map[string][]string{}, short: a.commits, ledger: a.Ledger}
 	for _, hash := range a.Chain.Order {
 		b := a.Chain.Blocks[hash]
 		if !b.IsAcceptance() {
@@ -257,10 +267,25 @@ type SetCommit struct {
 // file it shares. A shared file says the code depends on it, not that it means
 // the same thing.
 const (
-	WhySeed   = "seed"
-	whyCommit = "commit:"
-	whyFile   = "file:"
+	WhySeed     = "seed"
+	whyCommit   = "commit:"
+	whyFile     = "file:"
+	whyRelation = "relation:"
 )
+
+// PinnedIntent is an intent asked for at a fixed revision, with what it said then
+// and where it stands now. Someone working from i7f3a#1 should know when #3 is
+// what the document says.
+type PinnedIntent struct {
+	Ref      string `json:"ref"`
+	Short    string `json:"short"`
+	Revision int    `json:"revision"` // the one asked for
+	Text     string `json:"text"`     // what it said then
+	Current  int    `json:"current"`  // the latest
+	State    string `json:"state"`
+	// Stale: it has moved on from the revision asked for, or no longer stands.
+	Stale bool `json:"stale,omitempty"`
+}
 
 // Set is a part of the relations: sentences, the commits they name, the files
 // those changed. It is what someone needs in order to work on those sentences,
@@ -276,14 +301,28 @@ type Set struct {
 	Baseline bool `json:"baseline,omitempty"`
 	// Missing is what was asked for and is not there.
 	Missing []string `json:"missing,omitempty"`
+	// Pinned is the intents asked for at a fixed revision. A set always holds the
+	// sentence as it is now, so this is where the older words are.
+	Pinned []PinnedIntent `json:"pinned,omitempty"`
+	// Digest names what the set holds: the same intents at the same revisions on the
+	// same lines, the same commits and the same files give the same digest, whoever
+	// asks and whyever. It says two people were given the same set, not that the
+	// code in those files is the same. It is worked out, never stored.
+	Digest string `json:"digest,omitempty"`
 }
 
 // Set follows the relations one step from where it starts: from a sentence to
 // its commits and their files, from a commit to its sentences and files, from
 // a file to the commits that changed it and their sentences. It stops there,
 // so one file everybody touches does not bring in the whole project.
+//
+// A confirmed depends_on from an intent asked for brings the intent it depends on,
+// its commits and their files, and no further. A confirmed parallel takes nothing
+// out: it is noted on the sentence, because tig does not decide what goes in a
+// piece of work.
 func (r *Relations) Set(in SetInput) Set {
 	out := Set{FileWhy: map[string]string{}}
+	seeds := map[string]bool{} // the intents asked for
 	sentences := map[int]string{}
 	commits := map[int]string{}
 	note := func(m map[int]string, i int, why string) {
@@ -329,12 +368,26 @@ func (r *Relations) Set(in SetInput) Set {
 		short := ref
 		if p, err := ParseRef(ref); err == nil && p.Kind == RefIntent {
 			short = "i" + p.Code
+			if r.ledger != nil {
+				if i, err := r.ledger.Intent(short); err == nil {
+					short = i.Short // any start of its hash names it
+				}
+			}
+			if p.Revision > 0 {
+				pin, ok := r.pin(ref, p)
+				if !ok {
+					out.Missing = append(out.Missing, ref)
+					continue
+				}
+				out.Pinned = append(out.Pinned, pin)
+			}
 		}
 		found := false
 		for i, s := range r.Sentences {
 			for _, it := range s.Intents {
 				if it.Short == short || strings.HasPrefix(it.Short, short) {
 					found = true
+					seeds[it.Short] = true
 					sentences[i] = WhySeed
 					fromRefs(it.Commits, whyCommit+strings.Join(it.Commits, ","))
 				}
@@ -356,6 +409,9 @@ func (r *Relations) Set(in SetInput) Set {
 			}
 			found = true
 			sentences[i] = WhySeed
+			for _, it := range s.Intents {
+				seeds[it.Short] = true
+			}
 			leaves, baseline := r.sentenceLeaves(s)
 			out.Baseline = out.Baseline || baseline
 			for _, c := range leaves {
@@ -396,9 +452,55 @@ func (r *Relations) Set(in SetInput) Set {
 			}
 		}
 	}
+	for _, s := range r.Sentences {
+		for _, it := range s.Intents {
+			if !seeds[it.Short] {
+				continue
+			}
+			for _, rel := range it.Relations {
+				if rel.Kind != RelationDependsOn || rel.Incoming || rel.State != LinkConfirmed {
+					continue
+				}
+				why := whyRelation + it.Short
+				for j, t := range r.Sentences {
+					for _, dep := range t.Intents {
+						if dep.Short != rel.With {
+							continue
+						}
+						note(sentences, j, why)
+						for _, ref := range dep.Commits {
+							w, err := r.short.Resolve(ref)
+							if err != nil {
+								continue
+							}
+							for _, id := range r.leaves[w.ID] {
+								leaf := r.byID[id]
+								if c := r.Commits[leaf]; r.counts(c) {
+									note(commits, leaf, why)
+									for _, f := range c.Files {
+										addFile(f, why)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 	for i, s := range r.Sentences {
 		if why, ok := sentences[i]; ok {
 			s.Why = why
+			for _, it := range s.Intents {
+				if seeds[it.Short] {
+					continue
+				}
+				for _, rel := range it.Relations {
+					if rel.Kind == RelationParallel && rel.State == LinkConfirmed && seeds[rel.With] {
+						s.Parallel = appendNew(s.Parallel, rel.With)
+					}
+				}
+			}
 			out.Sentences = append(out.Sentences, s)
 		}
 	}
@@ -411,7 +513,64 @@ func (r *Relations) Set(in SetInput) Set {
 		out.Files = append(out.Files, f)
 	}
 	slices.Sort(out.Files)
+	out.Digest = r.digest(out, commits)
 	return out
+}
+
+// pin is what an intent said at the revision asked for; false when it never had
+// that revision, which is a different thing from having moved on from it.
+func (r *Relations) pin(ref string, p Ref) (PinnedIntent, bool) {
+	if r.ledger == nil {
+		return PinnedIntent{Ref: ref, Revision: p.Revision}, true
+	}
+	i, err := r.ledger.Intent("i" + p.Code)
+	if err != nil {
+		return PinnedIntent{}, false
+	}
+	e, ok := i.RevisionEvent(p.Revision)
+	if !ok {
+		return PinnedIntent{}, false
+	}
+	return PinnedIntent{Ref: ref, Short: i.Short, Revision: p.Revision, Text: e.Text, Current: i.Revision, State: i.State,
+		Stale: p.Revision != i.Revision || !i.Active()}, true
+}
+
+// digest names what a set holds. A short ID can grow when another intent comes to
+// share its start, so it goes by the whole hash. Why something is there is not part
+// of it: two ways to the same set are the same set.
+func (r *Relations) digest(out Set, commits map[int]string) string {
+	id := func(short string) string {
+		if r.ledger != nil {
+			if i, err := r.ledger.Intent(short); err == nil {
+				return i.ID
+			}
+		}
+		return short
+	}
+	var lines []string
+	for _, s := range out.Sentences {
+		lines = append(lines, fmt.Sprintf("line %s %d", s.Hash, s.N))
+		for _, it := range s.Intents {
+			lines = append(lines, fmt.Sprintf("intent %s#%d", id(it.Short), it.Revision))
+		}
+	}
+	for _, p := range out.Pinned {
+		lines = append(lines, fmt.Sprintf("pinned %s#%d", id(p.Short), p.Revision))
+	}
+	for c := range commits {
+		lines = append(lines, "commit "+r.Commits[c].ID)
+	}
+	for _, f := range out.Files {
+		lines = append(lines, "file "+f)
+	}
+	if out.Baseline {
+		lines = append(lines, "baseline")
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	slices.Sort(lines)
+	return HashOf([]byte(strings.Join(slices.Compact(lines), "\n")))
 }
 
 // Kinds of group.

@@ -28,7 +28,7 @@ Agents get a fourth way, the [MCP server](mcp.md), which can propose but not dec
 
 ### Where a project stands
 
-`tigwx status` lists facts and changes nothing: the project and its main document, who you are acting as and where that came from, the last snapshot, the work in progress, what changed since the snapshot, lines waiting for a sync, proposed intents and links, candidate commits, and whether the chain is closed. It always ends with 0 when it can read the project. To branch on the chain, use `check`'s exit status. `status -json` has the same fields.
+`tigwx status` lists facts and changes nothing: the project and its main document, who you are acting as and where that came from, the last snapshot, the work in progress, what changed since the snapshot, lines waiting for a sync, proposed intents, links and relations, disputed intents, candidate commits, whether the chain is closed, and which files were left out because they look like secrets. It always ends with 0 when it can read the project. To branch on the chain, use `check`'s exit status. `status -json` has the same fields.
 
 ### Who is acting
 
@@ -43,7 +43,7 @@ tigwx config -unset user.by
 | | First | Then | Then | Then | Default |
 |---|---|---|---|---|---|
 | Actor | `-actor` | `$TIG_ACTOR` | project `user.name` | global `user.name` | `cli` |
-| By | `-by` | project `user.by` | global `user.by` | | `human` |
+| By | `-by` | project `user.by` | global `user.by` | | `human` at a terminal, `unknown` anywhere else |
 
 The project also keeps `root`, `inferred` and `outside` (comma-separated). They have no global value. The session comes from `-session` or `$TIG_SESSION`.
 
@@ -55,7 +55,7 @@ The program gets its arguments as given, the working folder from `-C`, and these
 
 ## Releasing
 
-`go run ./scripts/release <version>` builds the setup programs, the archives and `SHA256SUMS` for every system into `dist/`, with Go and nothing else. On GitHub, `.github/workflows/test.yml` runs the tests on Linux, Windows and macOS for every push to `main`, and `.github/workflows/release.yml` publishes a release for every `v*` tag. Tag only after the tests pass: the Go module proxy keeps a tagged version forever.
+`go run ./scripts/release <version>` builds the setup programs, the archives and `SHA256SUMS` for every system into `dist/`, with Go and nothing else. On GitHub, `.github/workflows/test.yml` runs the tests on Linux, Windows and macOS for every push to `main`, and `.github/workflows/release.yml` publishes a release for every `v*` tag, with a provenance attestation for each file (`gh attestation verify <file> --repo h94u041/tig`). Both build with the latest Go, not the oldest `go.mod` allows, so what is handed out has every fix the standard library has. Tag only after the tests pass: the Go module proxy keeps a tagged version forever.
 
 ## Your words, not tig's
 
@@ -66,7 +66,7 @@ tigwx accept -by alice -via review-board 7f3a
 tigwx mark -inferred -by shopbot -via nightly-scan -id 7f3a "Receipts are printed."
 ```
 
-The only meaning tig attaches: a link marked as a person's word (`by human`, the default on the command line) starts confirmed, and everything else starts proposed. Pass `-propose` to say otherwise. A tool that wants its own users' names as `by` should also pass `-propose`, and confirm through `tigwx link`.
+The only meaning tig attaches: a link or a relation marked as a person's word (`by human`) starts confirmed, and everything else starts proposed. On the command line `by human` is the default only at a terminal; a program running tigwx records `unknown` until it says who. Pass `-propose` to say otherwise. A tool that wants its own users' names as `by` should also pass `-propose`, and confirm through `tigwx link`.
 
 ## The flow
 
@@ -91,7 +91,17 @@ tigwx accept -by alice <id>         # accepting a commit carries the links it pr
 tigwx check -json                   # exit status 1 when the chain is not closed
 ```
 
-Editing a line and running `tigwx sync` moves what the edit did not reach and asks again about what it did. To say it all at once instead, `tigwx init -force` makes the code there one commit and has every line go with it, proposed.
+Editing a line and running `tigwx sync` moves what the edit did not reach and asks again about what it did; `tigwx sync -m why` says the change was meant. To say it all at once instead, `tigwx init -force` makes the code there one commit and has every line go with it, proposed.
+
+Say what intents have to do with each other, and where a decision came from, when you know:
+
+```sh
+tigwx relate -by alice -kind depends_on <intent> <intent>     # it does not hold without the other
+tigwx relate -by alice -kind parallel -m why <intent> <intent> # they stand apart, whatever code they share
+tigwx confirm -by alice -source "ticket 12" <intent>
+tigwx log <intent>                                            # everything that happened to it
+tigwx set -json -i <intent>#2                                 # what revision 2 said, and whether it moved on
+```
 
 ## Two questions, kept apart
 
@@ -106,4 +116,4 @@ A commit that changed files stands on a line as soon as something says so, and w
 
 ## Reading the answers
 
-`-json` answers are objects and lists with stable names, and new names may appear, so ignore what you don't know. Flags go before other arguments. Only `check` uses exit status 1, for a chain that is not closed; anything that went wrong is 2.
+`-json` answers are objects and lists with stable names, and new names may appear, so ignore what you don't know. In text, tigwx leaves out control characters, so that someone else's document cannot write to your terminal; `-json` gives the data as it is, escaped.

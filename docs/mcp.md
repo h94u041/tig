@@ -15,12 +15,14 @@
 | `check` | The closure report. It only reads. |
 | `start_work`, `record_step`, `finish_work` | Leave a footprint: start a work for some blocks, record each step, finish it. |
 | `read_commit` | One commit by its short ID: its intent, files, the sentences naming it, the commits it folds. |
-| `relation_set` | What a piece of work needs: from sentences, commits or files, the sentences, commits and files one step away. |
+| `relation_set` | What a piece of work needs: from intents, sentences, commits or files, the sentences, commits and files one step away, each saying why it is there, with a digest naming what it holds. |
 | `mark_sentence` | Say which commits follow a sentence. A sentence the document already says stays there; any other is a guess, written to the inferred document as proposed by an AI. Either way the link is only proposed. An agent cannot confirm an intent or a link. |
 | `reverse_marks` | Which lines seem to be about which files, by what the lines point at, and what nothing was found for. It follows fixed rules and writes nothing. |
 | `describe_sentence` | Say that a line is about files already there, and why. It is recorded as a proposal and binds nothing until someone agrees. |
+| `relate_intents` | Propose what two intents have to do with each other: `depends_on`, `part_of`, `parallel` or a word of its own. An agent can only propose. |
+| `intent_history` | Everything that happened to one intent: who said so, how, why and from what, and any decisions taken apart that nobody has settled. |
 | `resolve` | What any reference means: an intent, a line, a commit or an event. |
-| `sync_lines` | Bring the ledger up to edited lines: new marks, and the intents on them follow. |
+| `sync_lines` | Bring the ledger up to edited lines: new marks, and the intents on them follow. With `why`, the change is recorded as meant, and a person still looks at it. |
 | `fold_commits` | Fold commits under a new parent; lines then show the parent, and nothing disappears. |
 | `propose_link` | Propose that a block belongs with a file or another block. It is recorded as inferred. |
 
@@ -42,8 +44,11 @@ Every record carries an actor: the MCP client's name, unless the call names one.
 
 - tig runs nothing: an agent cannot make it run a command, since it could edit a document first.
 - An agent cannot confirm an intent or accept a commit: those tools are not served. Its sentences are recorded as guesses, by `ai`.
-- `read_file` reads only the project's own files: nothing outside the project, nothing Git ignores, nothing in `.git` or `.tig`, nothing through a symbolic link.
+- `read_file` reads only the project's own files: nothing outside the project, nothing Git ignores, nothing in `.git` or `.tig`, nothing through a symbolic link, and nothing that looks like a key unless Git tracks it.
 - A check an agent reports is recorded as what that agent said, and tig passes no verdict on it.
+- The server listens on stdin and stdout only: it opens no port, so what can reach it is what you started it for.
+
+**What it cannot do for you.** Documents, records and files are data written by whoever wrote them, and they reach the agent as they are. A line saying "ignore your instructions" is text, and tig does not filter it; the server tells the agent so, but only the agent can act on that. Treat a repository from someone you don't trust the way you would treat its issues and comments: let the agent read it, and keep what it can do small. Whatever an agent records stays a proposal until someone agrees, and that is the part tig does guarantee.
 
 ## Acceptance
 

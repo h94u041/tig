@@ -1,11 +1,12 @@
 module github.com/h94u041/tig
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
-	github.com/yuin/goldmark v1.7.13
-	golang.org/x/sys v0.41.0
+	github.com/yuin/goldmark v1.8.7
+	golang.org/x/sys v0.49.0
+	golang.org/x/term v0.47.0
 )
 
 require (

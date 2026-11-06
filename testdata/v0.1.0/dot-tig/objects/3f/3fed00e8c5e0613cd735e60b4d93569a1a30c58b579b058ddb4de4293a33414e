@@ -1,0 +1,9 @@
+# Counter
+
+Counts up. Code: [count](src/count.go).
+
+Stops at ten.
+
+## Limits
+
+Never goes below zero.

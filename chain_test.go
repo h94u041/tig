@@ -197,3 +197,26 @@ func TestBroken(t *testing.T) {
 		t.Fatal("not closed")
 	}
 }
+
+// A file a work took away is not a file that failed to follow its design.
+func TestDeletedFileDoesNotGoStale(t *testing.T) {
+	ctx := context.Background()
+	r, root := cubeProject(t)
+	os.Remove(filepath.Join(root, "docs/orphan.md"))
+	c, _ := r.Chain(ctx, "")
+	turnBlock := find(t, c, "docs/turn.md", "Turning")
+	r.StartWork(ctx, []string{turnBlock.Hash}, "build turning", "agent")
+	write(t, root, "src/helper.js", "help()\n")
+	r.RecordStep(ctx, tig.StepInput{Kind: tig.StepEdit})
+	os.Remove(filepath.Join(root, "src/helper.js"))
+	r.RecordStep(ctx, tig.StepInput{Kind: tig.StepEdit})
+	r.FinishWork(ctx, "", nil)
+
+	write(t, root, "docs/turn.md", strings.Replace(turn, "Turn one layer.", "Turn one layer, or the whole cube.", 1))
+	a, _ := r.Analyze(ctx, "")
+	for _, f := range a.Report.Stale {
+		if f.Path == "src/helper.js" {
+			t.Fatalf("a deleted file is reported: %s", messages(a.Report.Stale))
+		}
+	}
+}

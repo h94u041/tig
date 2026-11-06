@@ -1,0 +1,9 @@
+tig-intent-event 1
+kind proposed
+revision 1
+text Counts up.
+span c7aed38e666d24081711ceadb34e96502b0f0aeae52034577271ed9010da3e5c 1 0 10
+by human
+via direct
+actor old-version
+at 2026-11-06T13:03:44.4412297Z
