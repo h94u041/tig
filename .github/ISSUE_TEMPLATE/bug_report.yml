@@ -1,0 +1,44 @@
+name: Bug report
+description: tig did something it should not, or did not do what its documents say
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For anything that could be used against people, please [report it privately](https://github.com/h94u041/tig/security/advisories/new) instead.
+        Check what you paste: `.tig` and documents can hold what you would not want public.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `tigwx --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: system
+    attributes:
+      label: System
+      options: [Windows, macOS, Linux, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you did
+      description: The commands, in order, from a clean folder if you can.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: The output, and the exit status if it matters.
+    validations:
+      required: true
