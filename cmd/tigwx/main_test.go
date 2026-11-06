@@ -95,7 +95,7 @@ func TestCLI(t *testing.T) {
 	// What a line means, and what any reference says.
 	_, out = tp(t, dir, "commits")
 	commit := strings.Fields(out)[0]
-	if code, out = tp(t, dir, "mark", "-id", commit, "-confirm", "Counts up."); code != 0 {
+	if code, out = tp(t, dir, "mark", "-by", "human", "-id", commit, "-confirm", "Counts up."); code != 0 {
 		t.Fatal(out)
 	}
 	data, _ := os.ReadFile(filepath.Join(dir, "README.md"))

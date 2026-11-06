@@ -223,7 +223,7 @@ func TestStatus(t *testing.T) {
 	if code != 0 {
 		t.Fatal(errs)
 	}
-	want(t, out, "main document: README.md", "acting as: cli (default), by human (default)", "last snapshot: ", "chain closed: yes", "proposed intents: 0")
+	want(t, out, "main document: README.md", "acting as: cli (default), by unknown (no terminal)", "last snapshot: ", "chain closed: yes", "proposed intents: 0")
 
 	// It only reads.
 	_, before, _ := in(dir, "log", "-json")
@@ -364,7 +364,7 @@ func TestIdentity(t *testing.T) {
 		}
 		return s.Actor, s.ActorFrom, s.By, s.ByFrom
 	}
-	if a, f, b, bf := actor(); a != "cli" || f != "default" || b != "human" || bf != "default" {
+	if a, f, b, bf := actor(); a != "cli" || f != "default" || b != "unknown" || bf != "no terminal" {
 		t.Fatal(a, f, b, bf)
 	}
 	in(dir, "config", "-global", "user.name", "Pat")

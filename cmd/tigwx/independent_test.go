@@ -212,6 +212,54 @@ func TestAnotherToolUsesTig(t *testing.T) {
 		t.Fatalf("%+v", v)
 	}
 
+	// A change someone meant says why: a revision, with its reason and where it came from.
+	data, _ = os.ReadFile(filepath.Join(dir, "README.md"))
+	write(t, dir, "README.md", strings.Replace(string(data), "Receipts are printed.", "Receipts are printed twice.", 1))
+	synced = tj[sync](t, dir, "sync", "-m", "the auditor wants a copy", "-source", "ticket 12", "-by", "alice", "-via", "review-board")
+	if len(synced.Touched) != 1 || synced.Touched[0] != receipts.Short {
+		t.Fatalf("%+v", synced)
+	}
+	history := tj[struct {
+		Log []struct {
+			Kind   string `json:"kind"`
+			By     string `json:"by"`
+			Via    string `json:"via"`
+			Reason string `json:"reason"`
+			Source string `json:"source"`
+		} `json:"log"`
+	}](t, dir, "log", receipts.Short)
+	if len(history.Log) < 2 {
+		t.Fatalf("%+v", history)
+	}
+	last := history.Log[len(history.Log)-1]
+	if last.Kind != "revised" || last.By != "alice" || last.Via != "review-board" || last.Reason != "the auditor wants a copy" || last.Source != "ticket 12" {
+		t.Fatalf("%+v", last)
+	}
+
+	// What two intents have to do with each other, in its own word: tig keeps the
+	// word, and a proposal stays one until somebody agrees.
+	if code, out := tp(t, dir, "relate", "-kind", "printed_with", "-propose", "-by", "shopbot", "-via", "agent-7", "-m", "the receipt lists the cart", receipts.Short, cart.Short); code != 0 {
+		t.Fatal(out)
+	}
+	type relation struct {
+		Kind     string `json:"kind"`
+		With     string `json:"with"`
+		Incoming bool   `json:"incoming"`
+		State    string `json:"state"`
+		By       string `json:"by"`
+		Via      string `json:"via"`
+	}
+	related := func(ref string) []relation {
+		return tj[struct {
+			Intent struct {
+				Relations []relation `json:"relations"`
+			} `json:"intent"`
+		}](t, dir, "show", ref).Intent.Relations
+	}
+	if got := related(cart.Short); len(got) != 1 || got[0].Kind != "printed_with" || got[0].With != receipts.Short || !got[0].Incoming || got[0].State != "proposed" || got[0].By != "shopbot" || got[0].Via != "agent-7" {
+		t.Fatalf("%+v", got)
+	}
+
 	// Every query answers in JSON, including the ones nothing above needed.
 	blocks := tj[[]map[string]any](t, dir, "chain")
 	if len(blocks) == 0 {
