@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"time"
 
 	"github.com/h94u041/tig/hub"
@@ -21,7 +22,9 @@ const usage = `tighub keeps the documents and chains projects push to it, and sh
 Usage: tighub [-addr :8080] [-data dir] [-tokens file]
 
 The tokens file holds one "owner token" per line; a push needs its owner's
-token. Without one, the hub takes no pushes and only shows what it has.
+token, of at least 16 characters. Without one, the hub takes no pushes and only
+shows what it has. tighub speaks plain http: on a network, put it behind a
+reverse proxy that does https and limits how fast anyone may ask.
 `
 
 func main() {
@@ -38,12 +41,20 @@ func main() {
 		if tokens, err = hub.LoadTokens(*tokensFile); err != nil {
 			log.Fatal(err)
 		}
+		if runtime.GOOS != "windows" {
+			if fi, err := os.Stat(*tokensFile); err == nil && fi.Mode().Perm()&0o077 != 0 {
+				log.Printf("warning: others on this machine can read %s; chmod 600 it", *tokensFile)
+			}
+		}
 	}
 	if err := os.MkdirAll(*data, 0o755); err != nil {
 		log.Fatal(err)
 	}
+	// The limits are for a slow or stuck client: a push of the largest size has two
+	// minutes to arrive.
 	srv := &http.Server{Addr: *addr, Handler: hub.NewServer(*data, tokens).Handler(),
-		ReadHeaderTimeout: 10 * time.Second}
+		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute,
+		IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

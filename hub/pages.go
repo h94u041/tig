@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"embed"
 	"html/template"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -51,7 +52,8 @@ func escapePath(p string) string {
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
 	var buf bytes.Buffer
 	if err := pages.ExecuteTemplate(&buf, name, data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("page %s: %v", name, err)
+		http.Error(w, "the hub could not show that; its log says why", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -77,7 +79,7 @@ func (s *Server) loadProject(w http.ResponseWriter, r *http.Request) (*projectPa
 	}
 	pub, v, err := p.Latest(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		internalPage(w, r, err)
 		return nil, p, false
 	}
 	if v == nil {
@@ -177,7 +179,7 @@ func (s *Server) pageDoc(w http.ResponseWriter, r *http.Request) {
 	doc := r.PathValue("path")
 	files, err := tig.ReadTree(r.Context(), p.Objects(), pp.Head.Docs)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		internalPage(w, r, err)
 		return
 	}
 	e, ok := files[doc]
@@ -187,7 +189,7 @@ func (s *Server) pageDoc(w http.ResponseWriter, r *http.Request) {
 	}
 	data, err := p.Objects().GetObject(r.Context(), e.Hash)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		internalPage(w, r, err)
 		return
 	}
 	md := markdown(pp.Base, doc, files)

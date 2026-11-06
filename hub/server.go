@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 
@@ -22,8 +23,10 @@ import (
 
 // Limits on what a push may carry.
 const (
-	maxPush   = 32 << 20 // the whole request
-	maxObject = 4 << 20  // one object; tig reads no larger document
+	maxPush    = 32 << 20 // the whole request
+	maxObject  = 4 << 20  // one object; tig reads no larger document
+	maxMissing = 4 << 20  // a question about which objects the hub has
+	minToken   = 16       // a shorter token can be guessed
 )
 
 // Server is a hub: projects' publications, kept in a folder, one folder per
@@ -60,6 +63,9 @@ func LoadTokens(file string) (map[string]string, error) {
 		token = strings.TrimSpace(token)
 		if !ok || !validName(owner) || token == "" {
 			return nil, fmt.Errorf("hub: %s:%d: want \"owner token\"", file, n)
+		}
+		if len(token) < minToken {
+			return nil, fmt.Errorf("hub: %s:%d: the token is shorter than %d characters", file, n, minToken)
 		}
 		out[token] = owner
 	}
@@ -240,6 +246,46 @@ func fail(w http.ResponseWriter, code int, format string, args ...any) {
 	writeJSON(w, code, apiError{Error: fmt.Sprintf(format, args...)})
 }
 
+// internal answers for something that went wrong here and not with the request.
+// What went wrong names folders of this machine, so it goes in the log.
+func internal(w http.ResponseWriter, r *http.Request, err error) {
+	log.Printf("%s %s: %v", r.Method, r.URL.Path, err)
+	fail(w, http.StatusInternalServerError, "the hub could not do that; its log says why")
+}
+
+// internalPage is internal for a page.
+func internalPage(w http.ResponseWriter, r *http.Request, err error) {
+	log.Printf("%s %s: %v", r.Method, r.URL.Path, err)
+	http.Error(w, "the hub could not show that; its log says why", http.StatusInternalServerError)
+}
+
+// mayPush reports whether the request's token is the project owner's, and answers
+// if it is not.
+func (s *Server) mayPush(w http.ResponseWriter, r *http.Request, p Project) bool {
+	switch owner := s.owner(r); {
+	case owner == "":
+		fail(w, http.StatusUnauthorized, "a push needs the owner's token")
+		return false
+	case owner != p.Owner:
+		fail(w, http.StatusForbidden, "the token is not %s's", p.Owner)
+		return false
+	}
+	return true
+}
+
+// guarded sets what a browser needs to be told about pages made of what other
+// people pushed: a document's HTML is theirs, and it may not run anything, load
+// anything from elsewhere or be framed.
+func guarded(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Handler serves the hub: the API and the pages.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -250,7 +296,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /{owner}/{name}", s.pageProject)
 	mux.HandleFunc("GET /{owner}/{name}/log", s.pageLog)
 	mux.HandleFunc("GET /{owner}/{name}/doc/{path...}", s.pageDoc)
-	return mux
+	return guarded(mux)
 }
 
 func (s *Server) project(w http.ResponseWriter, r *http.Request) (Project, bool) {
@@ -268,7 +314,7 @@ func (s *Server) apiProject(w http.ResponseWriter, r *http.Request) {
 	}
 	pub, v, err := p.Latest(r.Context())
 	if err != nil {
-		fail(w, http.StatusInternalServerError, "%v", err)
+		internal(w, r, err)
 		return
 	}
 	info := ProjectInfo{Owner: p.Owner, Name: p.Name, Chain: v}
@@ -283,9 +329,12 @@ func (s *Server) apiMissing(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.mayPush(w, r, p) {
+		return
+	}
 	var req missingRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxPush)).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, "%v", err)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxMissing)).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, "the question is not readable or too large")
 		return
 	}
 	resp := missingResponse{Missing: []string{}}
@@ -302,23 +351,18 @@ func (s *Server) apiPush(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	switch owner := s.owner(r); {
-	case owner == "":
-		fail(w, http.StatusUnauthorized, "a push needs the owner's token")
-		return
-	case owner != p.Owner:
-		fail(w, http.StatusForbidden, "the token is not %s's", p.Owner)
+	if !s.mayPush(w, r, p) {
 		return
 	}
 	var req pushRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxPush)).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, "the push is not readable or too large: %v", err)
+		fail(w, http.StatusBadRequest, "the push is not readable or too large")
 		return
 	}
 	defer s.lock(p)()
 	head, err := p.Head()
 	if err != nil {
-		fail(w, http.StatusInternalServerError, "%v", err)
+		internal(w, r, err)
 		return
 	}
 	if req.Old != head {
@@ -333,12 +377,12 @@ func (s *Server) apiPush(w http.ResponseWriter, r *http.Request) {
 	store := p.Objects()
 	for _, data := range keep {
 		if _, err := store.PutObject(r.Context(), data); err != nil {
-			fail(w, http.StatusInternalServerError, "%v", err)
+			internal(w, r, err)
 			return
 		}
 	}
 	if err := p.setHead(req.New); err != nil {
-		fail(w, http.StatusInternalServerError, "%v", err)
+		internal(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, pushResponse{Head: req.New})

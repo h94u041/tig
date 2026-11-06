@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/h94u041/tig"
 )
@@ -22,12 +24,30 @@ type PushResult struct {
 	Unsnapped   []string // documents changed since the latest snapshot, so not pushed as they are now
 }
 
+// PushOptions says how to push.
+type PushOptions struct {
+	Token, Actor, Note string
+	// Insecure sends the token over plain http to another machine, where anyone on
+	// the way can read it and then push as you. Without it that is refused.
+	Insecure bool
+}
+
 // Push sends the project's documents and chain to a hub. project is the
-// project's address there, http://host/owner/name.
+// project's address there, https://host/owner/name. A token goes over plain http
+// only to this machine.
 func Push(ctx context.Context, r *tig.Repo, project, token, actor, note string) (PushResult, error) {
+	return PushWith(ctx, r, project, PushOptions{Token: token, Actor: actor, Note: note})
+}
+
+// PushWith is Push with its options.
+func PushWith(ctx context.Context, r *tig.Repo, project string, opts PushOptions) (PushResult, error) {
+	token, actor, note := opts.Token, opts.Actor, opts.Note
 	api, err := apiURL(project)
 	if err != nil {
 		return PushResult{}, err
+	}
+	if token != "" && !opts.Insecure && !safeForToken(api) {
+		return PushResult{}, fmt.Errorf("hub: %s is plain http to another machine, and the token would be readable on the way; use https, or say so with -insecure", project)
 	}
 	c := &client{api: api, token: token}
 	var res PushResult
@@ -110,6 +130,31 @@ func apiURL(project string) (string, error) {
 	return strings.TrimSuffix(u.String(), "/") + "/api/v1/projects/" + owner + "/" + name, nil
 }
 
+// safeForToken reports whether a token can go to this address: over https, or to
+// this machine.
+func safeForToken(address string) bool {
+	u, err := url.Parse(address)
+	if err != nil {
+		return false
+	}
+	if u.Scheme == "https" {
+		return true
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// A push is small and a hub answers or does not. It follows no redirect: one could
+// take the token to a plain address.
+var httpClient = &http.Client{
+	Timeout:       2 * time.Minute,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
 type client struct {
 	api, token string
 }
@@ -133,7 +178,7 @@ func (c *client) call(ctx context.Context, method, suffix string, body, out any)
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
