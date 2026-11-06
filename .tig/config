@@ -1,4 +1,4 @@
 tig-config 1
 root README.md
-verify strict
 outside i18n
+outside testdata

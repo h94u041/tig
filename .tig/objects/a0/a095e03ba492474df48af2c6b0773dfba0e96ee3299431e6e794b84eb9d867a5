@@ -1,0 +1,2 @@
+# The same bytes on every platform, so the files match the footprint in .tig.
+* text=auto eol=lf

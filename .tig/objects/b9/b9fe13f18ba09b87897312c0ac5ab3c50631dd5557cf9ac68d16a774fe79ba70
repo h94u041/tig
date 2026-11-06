@@ -1,0 +1,20 @@
+name: Idea or request
+description: Something tig should let you do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The situation and what gets in the way, more than the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you would like
+      description: tig records and does not judge, so if this needs a decision, say who makes it.
+  - type: textarea
+    id: now
+    attributes:
+      label: What you do today instead

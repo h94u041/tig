@@ -1,0 +1,696 @@
+package tig
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"path"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+	"time"
+)
+
+// A project that came with code has documents that nothing connects to it yet.
+// There are two ways to connect them. InitForce says it all at once: everything
+// is one commit, and every line goes with that. Reverse looks for what the lines
+// themselves point at, and only proposes: it reads the documents and the code,
+// follows fixed rules, uses no model, and writes nothing. Describe writes one
+// correspondence down, for someone to decide on.
+
+// How a line came to point at files, strongest first.
+const (
+	ClueLink    = "link"    // a Markdown link to the file
+	CluePath    = "path"    // inline code naming a file or a folder
+	ClueWord    = "word"    // a path written out in the text
+	ClueSymbol  = "symbol"  // inline code naming something the files define or use
+	ClueHeading = "heading" // the section's title is a folder's name
+)
+
+// How much each kind of clue is worth, out of 100. A symbol found in many files
+// is worth less for each of them.
+var clueScore = map[string]int{ClueLink: 95, CluePath: 90, ClueWord: 75, ClueSymbol: 60, ClueHeading: 30}
+
+const (
+	maxSymbolFiles  = 5   // a symbol in more files than this says nothing
+	maxFolderFiles  = 40  // a folder with more files than this is not one thing
+	maxSymbolLength = 80  // longer inline code is an expression, not a name
+	maxScannedBytes = 1e6 // larger files are not read for symbols
+)
+
+// Clue is one reason a line goes with some files.
+type Clue struct {
+	Kind  string   `json:"kind"`
+	Text  string   `json:"text"` // what in the line, or the title, says so
+	Files []string `json:"files"`
+	Score int      `json:"score"`
+}
+
+// ReverseCandidate is part of a line and the files it seems to be about.
+type ReverseCandidate struct {
+	Path string `json:"path"`
+	Line int    `json:"line"` // 1-based
+	// Text is the part of the line it covers: a sentence of it, From to To.
+	Text string `json:"text"`
+	Hash string `json:"hash"`
+	N    int    `json:"n"`
+	From int    `json:"from"`
+	To   int    `json:"to"`
+	// Files are what the clues lead to, Score the strongest of them.
+	Files []string `json:"files"`
+	Score int      `json:"score"`
+	Clues []Clue   `json:"clues"`
+}
+
+// OpenLine is a line of a document with no code said to go with it, and none found.
+type OpenLine struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Text string `json:"text"`
+}
+
+// ReverseResult is what the rules found, and what they could not place.
+type ReverseResult struct {
+	Candidates []ReverseCandidate `json:"candidates,omitempty"`
+	// OpenLines are lines nothing was found for.
+	OpenLines []OpenLine `json:"openLines,omitempty"`
+	// OpenFiles are files no line reaches and no candidate leads to.
+	OpenFiles []string `json:"openFiles,omitempty"`
+}
+
+var (
+	markdownLink = regexp.MustCompile(`\[([^\]\n]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)`)
+	inlineCode   = regexp.MustCompile("`([^`\n]+)`")
+	pathWord     = regexp.MustCompile(`(?:^|[\s(（「『:：,，])((?:[\w.-]+/)+[\w.-]*)`)
+	symbolName   = regexp.MustCompile(`^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\(\))?$`)
+	wordIn       = regexp.MustCompile(`[A-Za-z_$][\w$]*`)
+	sentenceEnd  = regexp.MustCompile(`[。！？；!?;]+|\.(?:\s|$)`)
+)
+
+// sentencesOfLine cuts a line into its sentences, as ranges in code points. Code,
+// links and file names keep their dots: only a stop that ends a thought cuts.
+func sentencesOfLine(text string) [][2]int {
+	masked := markdownLink.ReplaceAllStringFunc(text, func(s string) string { return strings.Repeat("x", len(s)) })
+	masked = inlineCode.ReplaceAllStringFunc(masked, func(s string) string { return strings.Repeat("x", len(s)) })
+	var out [][2]int
+	start := 0
+	add := func(end int) {
+		from, to := start, end
+		for from < to && (text[from] == ' ' || text[from] == '\t') {
+			from++
+		}
+		for to > from && (text[to-1] == ' ' || text[to-1] == '\t') {
+			to--
+		}
+		if from < to {
+			out = append(out, [2]int{len([]rune(text[:from])), len([]rune(text[:to]))})
+		}
+	}
+	for _, loc := range sentenceEnd.FindAllStringIndex(masked, -1) {
+		end := loc[1]
+		add(end)
+		start = end
+	}
+	add(len(text))
+	return out
+}
+
+// sentenceAround is the sentence of the line holding the byte at.
+func sentenceAround(text string, parts [][2]int, at int) [2]int {
+	rune_ := len([]rune(text[:at]))
+	for _, p := range parts {
+		if rune_ >= p[0] && rune_ < p[1] {
+			return p
+		}
+	}
+	return [2]int{0, len([]rune(text))}
+}
+
+// projectIndex is the project's files, for matching what a line says against.
+type projectIndex struct {
+	files   []string
+	exact   map[string]bool
+	folders map[string][]string // folder → the files anywhere under it
+	byName  map[string][]string // a folder's own name, lowercase → the folders called that
+	symbols map[string][]string // a name asked about → the files using it
+}
+
+func (r *Repo) projectIndex(ctx context.Context, c *Chain) (*projectIndex, error) {
+	all, err := c.src.list(ctx)
+	if err != nil {
+		return nil, err
+	}
+	x := &projectIndex{exact: map[string]bool{}, folders: map[string][]string{}, byName: map[string][]string{}, symbols: map[string][]string{}}
+	for _, f := range all {
+		if IsMarkdown(f) || c.isOutside(f) {
+			continue
+		}
+		x.files = append(x.files, f)
+		x.exact[f] = true
+		for d := path.Dir(f); d != "."; d = path.Dir(d) {
+			if _, ok := x.folders[d]; !ok {
+				name := strings.ToLower(path.Base(d))
+				x.byName[name] = append(x.byName[name], d)
+			}
+			x.folders[d] = append(x.folders[d], f)
+		}
+	}
+	return x, nil
+}
+
+// scanSymbols finds which files use each of the names.
+func (x *projectIndex) scanSymbols(root string, names map[string]bool) {
+	if len(names) == 0 {
+		return
+	}
+	for _, f := range x.files {
+		full := filepath.Join(root, filepath.FromSlash(f))
+		if fi, err := os.Stat(full); err != nil || fi.Size() > maxScannedBytes {
+			continue
+		}
+		data, err := os.ReadFile(full)
+		if err != nil || slices.Contains(data[:min(len(data), 512)], 0) {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, w := range wordIn.FindAll(data, -1) {
+			word := string(w)
+			if names[word] && !seen[word] {
+				seen[word] = true
+				x.symbols[word] = append(x.symbols[word], f)
+			}
+		}
+	}
+}
+
+// filesAt is what a path in a document leads to: a file, or the files of a
+// folder. A document names things from where it is, or from the project's root.
+func (x *projectIndex) filesAt(doc, target string) []string {
+	target = strings.TrimSpace(target)
+	if i := strings.IndexAny(target, "#?"); i >= 0 {
+		target = target[:i]
+	}
+	if u, err := url.PathUnescape(target); err == nil {
+		target = u
+	}
+	target = strings.TrimPrefix(target, "./")
+	if target == "" || strings.Contains(target, "://") || strings.HasPrefix(target, "/") {
+		return nil
+	}
+	folder := strings.HasSuffix(target, "/")
+	for _, at := range []string{path.Join(path.Dir(doc), target), path.Clean(target)} {
+		if strings.HasPrefix(at, "..") {
+			continue
+		}
+		if !folder && x.exact[at] {
+			return []string{at}
+		}
+		if files := x.folders[at]; len(files) > 0 && len(files) <= maxFolderFiles {
+			return slices.Clone(files)
+		}
+	}
+	return nil
+}
+
+// cluesIn finds what a line points at, each clue at a byte of the line.
+type lineClue struct {
+	Clue
+	at int
+}
+
+func (x *projectIndex) cluesIn(doc, text string) []lineClue {
+	var out []lineClue
+	links := markdownLink.FindAllStringSubmatchIndex(text, -1)
+	for _, m := range links {
+		if files := x.filesAt(doc, text[m[4]:m[5]]); files != nil {
+			out = append(out, lineClue{Clue{Kind: ClueLink, Text: text[m[0]:m[1]], Files: files, Score: clueScore[ClueLink]}, m[0]})
+		}
+	}
+	code := inlineCode.FindAllStringSubmatchIndex(text, -1)
+	for _, m := range code {
+		word := text[m[2]:m[3]]
+		if files := x.filesAt(doc, word); files != nil {
+			out = append(out, lineClue{Clue{Kind: CluePath, Text: word, Files: files, Score: clueScore[CluePath]}, m[0]})
+			continue
+		}
+		if len(word) > maxSymbolLength || !symbolName.MatchString(word) {
+			continue
+		}
+		name := symbolKey(word)
+		files := x.symbols[name]
+		if len(files) == 0 || len(files) > maxSymbolFiles {
+			continue
+		}
+		score := clueScore[ClueSymbol] - 5*(len(files)-1)
+		out = append(out, lineClue{Clue{Kind: ClueSymbol, Text: word, Files: slices.Clone(files), Score: score}, m[0]})
+	}
+	// A path written out in the text, away from links and code.
+	masked := markdownLink.ReplaceAllStringFunc(text, func(s string) string { return strings.Repeat(" ", len(s)) })
+	masked = inlineCode.ReplaceAllStringFunc(masked, func(s string) string { return strings.Repeat(" ", len(s)) })
+	for _, m := range pathWord.FindAllStringSubmatchIndex(masked, -1) {
+		word := strings.TrimRight(masked[m[2]:m[3]], ".")
+		if files := x.filesAt(doc, word); files != nil {
+			out = append(out, lineClue{Clue{Kind: ClueWord, Text: word, Files: files, Score: clueScore[ClueWord]}, m[2]})
+		}
+	}
+	return out
+}
+
+// symbolKey is the name to look for: the last part of a.b.c(), which is what a
+// file spells.
+func symbolKey(word string) string {
+	word = strings.TrimSuffix(word, "()")
+	if i := strings.LastIndexByte(word, '.'); i >= 0 {
+		return word[i+1:]
+	}
+	return word
+}
+
+// wantedSymbols are the names the documents mention in inline code.
+func wantedSymbols(lines []string) map[string]bool {
+	out := map[string]bool{}
+	for _, line := range lines {
+		for _, m := range inlineCode.FindAllStringSubmatch(line, -1) {
+			if len(m[1]) <= maxSymbolLength && symbolName.MatchString(m[1]) {
+				out[symbolKey(m[1])] = true
+			}
+		}
+	}
+	return out
+}
+
+// Reverse finds which lines seem to be about which files. It writes nothing and
+// asks no model, so anyone gets the same answer from the same project. A line
+// already bound to those files, or one someone said does not go with them, is
+// not proposed again.
+func (r *Repo) Reverse(ctx context.Context) (ReverseResult, error) {
+	a, err := r.Analyze(ctx, "")
+	if err != nil {
+		return ReverseResult{}, err
+	}
+	c := a.Chain
+	x, err := r.projectIndex(ctx, c)
+	if err != nil {
+		return ReverseResult{}, err
+	}
+	var all []string
+	type docLines struct {
+		path  string
+		lines []string
+	}
+	var docs []docLines
+	for _, doc := range c.Docs {
+		data, err := c.src.read(ctx, doc)
+		if err != nil {
+			continue
+		}
+		lines := strings.Split(string(data), "\n")
+		docs = append(docs, docLines{doc, lines})
+		all = append(all, lines...)
+	}
+	x.scanSymbols(r.Root, wantedSymbols(all))
+
+	sentences := map[string]map[int]Sentence{}
+	a.sentences(func(s *Sentence) {
+		if sentences[s.Path] == nil {
+			sentences[s.Path] = map[int]Sentence{}
+		}
+		sentences[s.Path][s.Line] = *s
+	})
+
+	// A file counts as reached once a line goes with it, or is proposed to; the
+	// baseline stands for everything, so it reaches nothing in particular.
+	var out ReverseResult
+	reached := map[string]bool{}
+	a.sentences(func(s *Sentence) {
+		for _, it := range s.Intents {
+			for _, link := range it.Links {
+				for _, f := range link.Files {
+					reached[f] = true
+				}
+			}
+		}
+	})
+	for _, d := range docs {
+		fenced := fencedLines(d.lines)
+		blocks := ParseBlocks(d.path, []byte(strings.Join(d.lines, "\n")))
+		headingUsed := map[string]bool{}
+		for i, line := range d.lines {
+			if fenced[i] || isHeading(line) || !isTrackedLine(line) {
+				continue
+			}
+			text := LineText(line)
+			s, known := sentences[d.path][i+1]
+			hash, n := LineHash(text), 1
+			if known {
+				if s.Hash != "" {
+					hash = s.Hash
+				}
+				if s.N > 0 {
+					n = s.N
+				}
+			}
+			clues := x.cluesIn(d.path, text)
+			if len(clues) == 0 {
+				if b := headingOfLine(blocks, i+1); b != "" && !headingUsed[b] {
+					if files := x.folderNamed(b); files != nil {
+						headingUsed[b] = true
+						clues = append(clues, lineClue{Clue{Kind: ClueHeading, Text: b, Files: files, Score: clueScore[ClueHeading]}, 0})
+					}
+				}
+			}
+			taken := a.Ledger.filesSaidOn(a, hash, n)
+			parts := sentencesOfLine(text)
+			found := map[[2]int]*ReverseCandidate{}
+			var order [][2]int
+			for _, clue := range clues {
+				var fresh []string
+				for _, f := range clue.Files {
+					if !taken[f] {
+						fresh = append(fresh, f)
+					}
+				}
+				if len(fresh) == 0 {
+					continue
+				}
+				clue.Files = fresh
+				span := sentenceAround(text, parts, clue.at)
+				if clue.Kind == ClueHeading {
+					span = [2]int{0, len([]rune(text))}
+				}
+				cand := found[span]
+				if cand == nil {
+					cand = &ReverseCandidate{Path: d.path, Line: i + 1, Text: sliceRunes(text, span[0], span[1]), Hash: hash, N: n, From: span[0], To: span[1]}
+					found[span] = cand
+					order = append(order, span)
+				}
+				cand.Clues = append(cand.Clues, clue.Clue)
+				cand.Score = max(cand.Score, clue.Score)
+				for _, f := range fresh {
+					cand.Files = appendNew(cand.Files, f)
+				}
+			}
+			for _, span := range order {
+				cand := found[span]
+				slices.Sort(cand.Files)
+				for _, f := range cand.Files {
+					reached[f] = true
+				}
+				out.Candidates = append(out.Candidates, *cand)
+			}
+			if len(order) == 0 && !a.lineHasCode(s) {
+				out.OpenLines = append(out.OpenLines, OpenLine{Path: d.path, Line: i + 1, Text: text})
+			}
+		}
+	}
+	for _, f := range x.files {
+		if !reached[f] {
+			out.OpenFiles = append(out.OpenFiles, f)
+		}
+	}
+	return out, nil
+}
+
+// lineHasCode says whether something other than the baseline stands on a line.
+func (a *Analysis) lineHasCode(s Sentence) bool {
+	for _, it := range s.Intents {
+		for _, link := range it.Links {
+			if len(link.Files) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// folderNamed is the files of the one folder with this name, if there is just
+// one and it is not too big to be one thing.
+func (x *projectIndex) folderNamed(title string) []string {
+	folders := x.byName[strings.ToLower(strings.TrimSpace(title))]
+	if len(folders) != 1 {
+		return nil
+	}
+	files := x.folders[folders[0]]
+	if len(files) > maxFolderFiles {
+		return nil
+	}
+	return slices.Clone(files)
+}
+
+// filesSaidOn is every file something has already said about a line, either way:
+// by a link that stands or by one someone turned down. Reverse leaves those alone.
+func (l *Ledger) filesSaidOn(a *Analysis, hash string, n int) map[string]bool {
+	out := map[string]bool{}
+	add := func(e LinkEvent) {
+		w, err := a.commits.Resolve(e.Work)
+		if err != nil || w.Result == ResultBaseline {
+			return
+		}
+		for _, leaf := range a.commits.Leaves(w.ID) {
+			for _, f := range a.workFiles[leaf] {
+				out[f] = true
+			}
+		}
+	}
+	for _, i := range l.on(hash, n) {
+		for _, e := range l.LinksOf(i.ID) {
+			add(e)
+		}
+		for _, e := range l.RejectedLinks(i.ID) {
+			add(e)
+		}
+	}
+	return out
+}
+
+// DescribeInput says a line, or part of one, is about files that are already there.
+type DescribeInput struct {
+	// Path is the document; the main document when empty.
+	Path string
+	// Sentence is the line or the part of it. One no document says goes into the
+	// inferred document, under Under.
+	Sentence string
+	Under    string
+	// Line, when above 0, tells apart lines that say the same thing.
+	Line  int
+	Files []string
+	// Intent is the commit's one line; the sentence when empty.
+	Intent string
+	// Link is what the link starts as; see MarkInput.
+	Link   string
+	By     string
+	Via    string
+	Actor  string
+	Reason string
+	Source string // what it was decided from
+}
+
+// Described is what Describe wrote.
+type Described struct {
+	Work Work `json:"work"`
+	Mark Mark `json:"mark"`
+}
+
+// Describe writes down that a line is about files already there: a commit that
+// changed nothing and reaches those files, and a link from the line's intent to
+// it. Whoever is not a person only proposes it. It binds nothing until someone
+// agrees, so it never closes the chain by itself.
+func (r *Repo) Describe(ctx context.Context, in DescribeInput) (Described, error) {
+	if r.Dir == "" {
+		return Described{}, errors.New("tig: describing needs a .tig folder")
+	}
+	if len(in.Files) == 0 {
+		return Described{}, errors.New("tig: a description needs at least one file")
+	}
+	sentence, err := checkSentence(in.Sentence)
+	if err != nil {
+		return Described{}, err
+	}
+	var paths []string
+	for _, f := range in.Files {
+		f = filepath.ToSlash(f)
+		full, err := r.safePath(f)
+		if err != nil {
+			return Described{}, err
+		}
+		if fi, err := os.Stat(full); err != nil || !fi.Mode().IsRegular() {
+			return Described{}, fmt.Errorf("tig: %s is not a file of the project", f)
+		}
+		paths = appendNew(paths, f)
+	}
+	snap, _, err := r.Take(ctx, ReasonUpdate, in.Actor)
+	if err != nil {
+		return Described{}, err
+	}
+	empty, err := WriteTree(ctx, r.Objects, nil)
+	if err != nil {
+		return Described{}, err
+	}
+	tree, err := r.With(ctx, empty, paths)
+	if err != nil {
+		return Described{}, err
+	}
+	intent := strings.TrimSpace(in.Intent)
+	if intent == "" {
+		intent = sentence
+	}
+	now := time.Now().UTC()
+	step, err := r.PutStep(ctx, Step{Kind: StepEdit, Before: empty, After: tree, Note: intent, Actor: in.Actor, At: now})
+	if err != nil {
+		return Described{}, err
+	}
+	w, err := r.PutWork(ctx, Work{Intent: intent, After: snap.ID, Steps: []string{step.ID}, Result: ResultDescribed, Actor: in.Actor, Started: now, At: now})
+	if err != nil {
+		return Described{}, err
+	}
+	m, err := r.Mark(ctx, MarkInput{Path: in.Path, Sentence: sentence, Under: in.Under, Line: in.Line, IDs: []string{w.ID}, Inferred: true, LinkKind: LinkDescribes, Link: in.Link, By: in.By, Via: in.Via, Actor: in.Actor, Reason: in.Reason, Source: in.Source})
+	if err != nil {
+		return Described{Work: w}, err
+	}
+	return Described{Work: w, Mark: m}, nil
+}
+
+// ProposeReverse writes the candidates down as proposals, each with its clues as
+// the reason.
+func (r *Repo) ProposeReverse(ctx context.Context, candidates []ReverseCandidate, by, via, actor string) ([]Described, error) {
+	var out []Described
+	var problems []error
+	for _, cand := range candidates {
+		d, err := r.Describe(ctx, DescribeInput{Path: cand.Path, Sentence: cand.Text, Line: cand.Line, Files: cand.Files, Link: LinkProposed, By: by, Via: via, Actor: actor, Reason: ClueReason(cand.Clues)})
+		if err != nil {
+			problems = append(problems, err)
+			continue
+		}
+		out = append(out, d)
+	}
+	return out, errors.Join(problems...)
+}
+
+// ClueReason says the clues in one line.
+func ClueReason(clues []Clue) string {
+	var parts []string
+	for _, c := range clues {
+		parts = append(parts, c.Kind+": "+c.Text)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// InitForceInput says all the code goes with all the lines.
+type InitForceInput struct {
+	Config Config
+	// Baseline is the commit's one line when one has to be made.
+	Baseline string
+	By       string
+	Actor    string
+}
+
+// InitForceResult is what InitForce did.
+type InitForceResult struct {
+	Baseline Work     `json:"baseline"`
+	Created  bool     `json:"created"` // false: the project had a baseline already
+	Docs     []string `json:"docs,omitempty"`
+	Lines    int      `json:"lines"`
+}
+
+// InitForce starts tig, or goes on with it, saying it all at once: the code that
+// is there is one commit, the baseline, and every line of the documents goes with
+// that. Each line gets an intent, proposed, because nobody has said this line
+// means that. A line that already has an intent is left as it is, so it can run
+// again.
+func (r *Repo) InitForce(ctx context.Context, in InitForceInput) (InitForceResult, error) {
+	if err := r.Init(in.Config); err != nil {
+		return InitForceResult{}, err
+	}
+	var out InitForceResult
+	works, err := r.Works(ctx, 0)
+	if err != nil {
+		return out, err
+	}
+	for _, w := range works {
+		if w.Result == ResultBaseline {
+			out.Baseline = w
+		}
+	}
+	if out.Baseline.ID == "" {
+		intent := in.Baseline
+		if intent == "" {
+			intent = "the project as it was before tig"
+		}
+		if out.Baseline, err = r.Baseline(ctx, intent, in.Actor); err != nil {
+			return out, err
+		}
+		out.Created = true
+	}
+	unlock, err := lockRepo(ctx, r.Dir)
+	if err != nil {
+		return out, err
+	}
+	defer unlock()
+	_, l, err := r.syncLocked(ctx, SyncInput{Actor: in.Actor})
+	if err != nil {
+		return out, err
+	}
+	chain, err := r.Chain(ctx, "")
+	if err != nil {
+		return out, err
+	}
+	used := r.usedLines(chain.Docs)
+	state := LinkProposed
+	if in.By == ByHuman {
+		state = LinkConfirmed
+	}
+	for _, doc := range chain.Docs {
+		full, data, err := r.readDoc(doc)
+		if err != nil {
+			return out, err
+		}
+		lines := strings.Split(string(data), "\n")
+		fenced := fencedLines(lines)
+		changed := false
+		for i, line := range lines {
+			if fenced[i] || isHeading(line) || !isTrackedLine(line) {
+				continue
+			}
+			text := LineText(line)
+			hash := LineHash(text)
+			m, marked := readLineMark(line)
+			n := m.N
+			if !marked {
+				n = nextFree(used, hash)
+			}
+			if len(l.on(hash, n)) > 0 {
+				continue
+			}
+			if _, err := r.Objects.PutObject(ctx, []byte(text)); err != nil {
+				return out, err
+			}
+			if !l.lines[hash] {
+				if err := r.addLineEvent(l, hash, ""); err != nil {
+					return out, err
+				}
+			}
+			it, err := r.addEvent(l, IntentEvent{Kind: IntentProposed, Text: text, Spans: []Span{{Line: hash, N: n, From: 0, To: len([]rune(text))}}, By: in.By, Via: ViaInit, Actor: in.Actor})
+			if err != nil {
+				return out, err
+			}
+			if err := r.addLink(l, LinkEvent{Work: out.Baseline.ID, Intent: it.ID, Revision: it.Revision, Kind: LinkImplements, State: state, By: in.By, Via: ViaInit, Actor: in.Actor}); err != nil {
+				return out, err
+			}
+			if !marked {
+				lines[i] = setLineMark(line, LineMark{Hash: l.shortLine(hash), N: n})
+				changed = true
+			}
+			out.Lines++
+		}
+		if changed {
+			if err := writeDoc(full, []byte(strings.Join(lines, "\n"))); err != nil {
+				return out, err
+			}
+			out.Docs = appendNew(out.Docs, doc)
+		}
+	}
+	return out, nil
+}

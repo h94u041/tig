@@ -1,0 +1,2 @@
+# Objects are named by their exact bytes: Git must not change line endings.
+* -text

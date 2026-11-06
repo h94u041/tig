@@ -1,0 +1,9 @@
+tig-intent-event 1
+kind proposed
+revision 1
+text Stops at ten.
+span 4a2c63c66fbea468bda881529350b875b8514c6af022b1947762b617c15d895b 1 0 13
+by ai
+via old-agent
+actor old-version
+at 2026-11-06T13:03:44.5720671Z
